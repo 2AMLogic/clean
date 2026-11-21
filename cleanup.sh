@@ -1114,10 +1114,6 @@ fi  # gh CLI check
 
 fi  # SYSTEM_ONLY check
 
-# =============================================================================
-# SUMMARY
-# =============================================================================
-
 if [ "$RUN_SYSTEM" = true ]; then
     if command -v python3 >/dev/null; then
         python3 -B "$SCRIPT_DIR/scripts/system_report.py" "${PROJECTS[@]}" || step_failed "system report" "diagnostics failed"
@@ -1126,6 +1122,10 @@ if [ "$RUN_SYSTEM" = true ]; then
         record_item skipped "system report" "python3 unavailable"
     fi
 fi
+
+# =============================================================================
+# SUMMARY
+# =============================================================================
 
 echo "═══════════════════════════════════════════════════════════"
 if [ "$CHECK_MODE" = true ]; then
