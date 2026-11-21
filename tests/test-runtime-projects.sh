@@ -25,6 +25,7 @@ for p in squad loomish codexsrv desktopsrv linkedcli keeper envkeep plain truste
     mkdir -p "$PROJECT_DIR/$p/node_modules" "$PROJECT_DIR/$p/dist"
 done
 R="$(cd "$PROJECT_DIR" && pwd -P)"
+PROJECT_DIR="$R"
 
 # ~/.claude.json: a user server (absolute path) and a per-project server; the
 # "projects" keys themselves must NOT count.
@@ -62,6 +63,7 @@ expect() {
 }
 why() { runtime_project_reason "$PROJECT_DIR/$1" || echo "-"; }
 
+PROJECTS=("$PROJECT_DIR"/*)
 discover_runtime_projects
 expect "user MCP server in ~/.claude.json"          "$(why loomish)"    mcp
 expect "env var path in a project .mcp.json"        "$(why squad)"      mcp
