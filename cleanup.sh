@@ -39,20 +39,32 @@ else
     done
 fi
 
-VENV_AGE_DAYS=7
-TMP_AGE_HOURS=1              # /tmp clones must be at least this old
-PYCACHE_AGE_DAYS=14          # __pycache__ etc must be at least this old
-TARGET_AGE_DAYS=7            # rust target dirs must be at least this old
-NODE_MODULES_AGE_DAYS=7      # project must be idle this long before node_modules/.next go
-WORKTREE_AGE_DAYS=14         # non-issue agent worktrees must be at least this old
+# Resolve install.sh's symlink before loading repository helpers.
+script_path=${BASH_SOURCE[0]}
+while [ -L "$script_path" ]; do
+    link=$(readlink "$script_path")
+    case "$link" in /*) script_path=$link ;; *) script_path="$(dirname "$script_path")/$link" ;; esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$script_path")" && pwd -P)"
+
+VENV_AGE_DAYS=${CLEAN_VENV_AGE_DAYS:-7}
+TMP_AGE_HOURS=${CLEAN_TMP_AGE_HOURS:-1}
+PYCACHE_AGE_DAYS=${CLEAN_PYCACHE_AGE_DAYS:-14}
+TARGET_AGE_DAYS=${CLEAN_TARGET_AGE_DAYS:-7}
+NODE_MODULES_AGE_DAYS=${CLEAN_NODE_MODULES_AGE_DAYS:-7}
+WORKTREE_AGE_DAYS=${CLEAN_WORKTREE_AGE_DAYS:-14}
 LAKE_AGE_DAYS=${CLEAN_LAKE_AGE_DAYS:-7}
 SHARED_CARGO_SUMMARY=""
 CHECK_MODE=false
 AGGRESSIVE_MODE=false
-SYSTEM_ONLY=false
-TOTAL_SIZE=0
+JSON_MODE=false
+RUN_SYSTEM=true
+RUN_PROJECTS=true
+RUN_WORKTREES=true
+EXPLICIT_PROJECTS=false
+PROJECTS=()
 ACTIVE_WORKTREES=""
-
+PHASE=""
 # Parse arguments
 if [ "$1" = "--version" ] || [ "$1" = "-V" ]; then
     echo "clean $VERSION"
@@ -108,7 +120,9 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "  -V, --version      Print version and exit"
     echo "  -c, --check        Check how much space would be freed (dry run)"
     echo "  -a, --aggressive   Also run 'docker system prune -af --volumes'"
-    echo "  --system-only      Skip per-project cleanup (system caches only)"
+    echo "  --system-only | --projects-only | --worktrees-only    Select one phase"
+    echo "  --project DIR      Select a workspace (repeatable, or set CLEAN_PROJECTS)"
+    echo "  --json             Write a JSON summary to stdout and progress to stderr"
     echo ""
     echo "Environment:"
     echo "  CLEAN_PROJECT_DIR  Override project directory (default: auto-detect"
@@ -124,22 +138,91 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     exit 0
 fi
 
-for arg in "$@"; do
-    case "$arg" in
-        --check|-c) CHECK_MODE=true ;;
-        --aggressive|-a) AGGRESSIVE_MODE=true ;;
-        --system-only) SYSTEM_ONLY=true ;;
-    esac
+die() { echo "clean: $*" >&2; exit 2; }
+
+[ "$(uname -s)" = Darwin ] || die "cleanup requires macOS; no cleanup phases were run"
+for value in "$VENV_AGE_DAYS" "$TMP_AGE_HOURS" "$PYCACHE_AGE_DAYS" "$TARGET_AGE_DAYS" "$NODE_MODULES_AGE_DAYS" "$WORKTREE_AGE_DAYS" "$LAKE_AGE_DAYS"; do
+    [[ "$value" =~ ^[1-9][0-9]{0,4}$ ]] || die "age thresholds must be positive decimal integers (1–99999)"
 done
 
-if [ "$SYSTEM_ONLY" = false ] && [ -z "$PROJECT_DIR" ]; then
-    echo "⚠️  No project directory found (checked ~/GitHub, ~/Projects, ~/repos, ~/src)"
-    echo "   Set CLEAN_PROJECT_DIR or pass --system-only."
-    echo ""
-    SYSTEM_ONLY=true
+add_project() {
+    local path existing
+    [ -n "$1" ] && path=$(cd -- "$1" && pwd -P) || die "invalid project directory '$1'"
+    [ "$path" != / ] || die "the filesystem root cannot be a project"
+    for existing in "${PROJECTS[@]}"; do
+        [ "$path" != "$existing" ] || return 0
+    done
+    PROJECTS+=("$path")
+}
+if [ "${CLEAN_PROJECTS+x}" ]; then
+    EXPLICIT_PROJECTS=true
+    case ":$CLEAN_PROJECTS:" in *::*) die "CLEAN_PROJECTS contains an empty path" ;; esac
+    IFS=: read -r -a paths <<< "$CLEAN_PROJECTS"
+    for project in "${paths[@]}"; do add_project "$project"; done
+fi
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --check|-c) CHECK_MODE=true ;;
+        --aggressive|-a) AGGRESSIVE_MODE=true ;;
+        --json) JSON_MODE=true ;;
+        --project)
+            [ "$#" -ge 2 ] || die "--project requires a directory"
+            EXPLICIT_PROJECTS=true; add_project "$2"; shift ;;
+        --system-only|--projects-only|--worktrees-only)
+            [ -z "$PHASE" ] || [ "$PHASE" = "$1" ] || die "select only one cleanup phase"
+            PHASE=$1 ;;
+        *) die "unknown option '$1'" ;;
+    esac
+    shift
+done
+case "$PHASE" in
+    --system-only) RUN_PROJECTS=false; RUN_WORKTREES=false ;;
+    --projects-only) RUN_SYSTEM=false; RUN_WORKTREES=false ;;
+    --worktrees-only) RUN_SYSTEM=false; RUN_PROJECTS=false ;;
+esac
+
+if [ "$EXPLICIT_PROJECTS" = false ]; then
+    if [ -n "$PROJECT_DIR" ]; then
+        [ -d "$PROJECT_DIR" ] || die "invalid CLEAN_PROJECT_DIR '$PROJECT_DIR'"
+        for project in "$PROJECT_DIR"/*; do
+            [ -d "$project" ] && [ ! -L "$project" ] || continue
+            add_project "$project"
+        done
+    elif [ -n "$PHASE" ] && [ "$RUN_SYSTEM" = false ]; then
+        die "select a workspace with --project or CLEAN_PROJECT_DIR"
+    fi
 fi
 
+# Git hooks export paths which would override every subsequent git -C.
+if command -v git >/dev/null; then
+    git_env=$(git rev-parse --local-env-vars) || die "cannot identify repository-local Git environment"
+    for key in $git_env; do unset "$key"; done
+    unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+fi
+python3 -B -c 'pass' >/dev/null 2>&1 || die "Python 3 is required for cleanup"
+# One private, ephemeral journal also captures events in piped shell loops.
+run_dir=$(mktemp -d -t clean-events)
+CLEAN_EVENT_FILE="$run_dir/events"
+: > "$CLEAN_EVENT_FILE"
+export CLEAN_EVENT_FILE
+exec 3>&1
+[ "$JSON_MODE" = false ] || exec 1>&2
+finish() {
+    local result=$?
+    trap - EXIT
+    python3 -B "$SCRIPT_DIR/scripts/summary.py" "$CLEAN_EVENT_FILE" "$JSON_MODE" "$CHECK_MODE" "$result" >&3 || result=$?
+    rm -f "$CLEAN_EVENT_FILE" "$CLEAN_EVENT_FILE.candidates"
+    rm -rf -- "$run_dir/npm"
+    rmdir "$run_dir"
+    exit "$result"
+}
+trap finish EXIT
+record_item() { printf '%s\0' "$1" "$2" "$3" "${4:-0}" >> "$CLEAN_EVENT_FILE"; }
+step_failed() { echo "  [FAILED] $1 ($2)" >&2; record_item failed "$1" "$2"; }
+keep_item() { echo "  [KEEP $2] $1"; record_item kept "$1" "$2"; }
+
 if [ "$CHECK_MODE" = true ]; then
+    export GIT_OPTIONAL_LOCKS=0  # git status may otherwise refresh a worktree index
     echo "🔍 Checking potential space savings..."
     echo ""
 else
@@ -152,12 +235,24 @@ fi
 # HELPER FUNCTIONS
 # =============================================================================
 
+if ! command -v timeout >/dev/null; then
+    timeout() {
+        python3 -B -c 'import subprocess, sys
+try:
+    sys.exit(subprocess.run(sys.argv[2:], timeout=int(sys.argv[1])).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)' "$@"
+    }
+fi
+
 get_size() {
     du -sh "$1" 2>/dev/null | cut -f1
 }
 
-get_size_bytes() {
-    du -sk "$1" 2>/dev/null | cut -f1
+get_size_kib() {
+    local usage
+    usage=$(du -sk "$1") || return 1
+    echo "${usage%%[[:space:]]*}"
 }
 
 bytes_to_human() {
@@ -205,13 +300,17 @@ is_older_than_hours() {
 has_recent_activity_days() {
     local dir="$1"
     local days="$2"
-    [ -n "$(find "$dir" -mtime -"$days" -print -quit 2>/dev/null)" ]
+    local found
+    found=$(/usr/bin/find "$dir" -mtime -"$days" -print -quit) || return 0
+    [ -n "$found" ]
 }
 
 has_recent_activity_hours() {
     local dir="$1"
     local hours="$2"
-    [ -n "$(find "$dir" -mmin -"$(( hours * 60 ))" -print -quit 2>/dev/null)" ]
+    local found
+    found=$(/usr/bin/find "$dir" -mmin -"$(( hours * 60 ))" -print -quit) || return 0
+    [ -n "$found" ]
 }
 
 source "$SCRIPT_DIR/scripts/build-artifacts.sh"
@@ -228,7 +327,18 @@ has_unpushed_work() {
         return 0
     fi
 
-    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+    local changes
+    if [ -d "$wt/.git" ]; then
+        # Removing a full clone also removes refs and other worktrees' metadata.
+        local refs worktrees nested
+        refs=$(git -C "$wt" rev-list -1 --all --not --remotes) || return 0
+        [ -z "$refs" ] && ! git -C "$wt" rev-parse --verify -q refs/stash >/dev/null || return 0
+        worktrees=$(git -C "$wt" worktree list --porcelain) || return 0
+        [ "$(awk '/^worktree / {n++} END {print n+0}' <<< "$worktrees")" = 1 ] || return 0
+        nested=$(/usr/bin/find "$wt" -mindepth 1 -path "$wt/.git" -prune -o -name .git -print -quit) || return 0
+        [ -z "$nested" ] || return 0
+    fi
+    if ! changes=$(git -C "$wt" status --porcelain --untracked-files=all) || [ -n "$changes" ]; then
         return 0
     fi
 
@@ -252,10 +362,11 @@ has_unpushed_work() {
 # Returns 0 (true) if there ARE open handles — caller should skip.
 has_open_handles() {
     local dir="$1"
-    if ! command -v lsof &> /dev/null; then
-        return 1  # lsof unavailable — err on side of "no handles"
-    fi
-    lsof +D "$dir" -t 2>/dev/null | head -1 | grep -q . && return 0 || return 1
+    local result rc
+    # lsof exits 1 with no output for a successful search with no matches.
+    # Warnings, permission errors and an unavailable lsof all preserve the item.
+    if result=$(lsof -nP -Fp +D "$dir" 2>&1); then return 0; else rc=$?; fi
+    [ "$rc" -ne 1 ] || [ -n "$result" ]
 }
 
 # Build a global list of all active git worktrees across all repos.
@@ -263,11 +374,9 @@ has_open_handles() {
 # Paths are normalized to physical form (pwd -P) so symlink aliases like
 # /tmp vs /private/tmp can't defeat the guard.
 discover_active_worktrees() {
-    [ -n "$PROJECT_DIR" ] || return
-    local repos="$PROJECT_DIR"/*/.git
-    for repo in $repos; do
-        [ -e "$repo" ] || continue
-        local repo_dir="$(dirname "$repo")"
+    local repo_dir
+    for repo_dir in "${PROJECTS[@]}"; do
+        [ -e "$repo_dir/.git" ] || continue
         local wts=$(cd "$repo_dir" && git worktree list --porcelain 2>/dev/null \
                     | awk '/^worktree / {print substr($0,10)}')
         local wt
@@ -387,9 +496,7 @@ tag_lines() {
 }
 
 discover_runtime_projects() {
-    [ -n "$PROJECT_DIR" ] || return 0
-    local root
-    root="$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)" || return 0
+    [ "${#PROJECTS[@]}" -gt 0 ] || return 0
     local have_py=false
     # /usr/bin/python3 is a stub that pops the Command Line Tools installer
     # when they are missing; only probe it when they are present.
@@ -414,16 +521,25 @@ discover_runtime_projects() {
             candidates+="$(grep -oE '"/[^"]+"' "$cfg" | tr -d '"' | tag_lines mcp)"$'\n'
         fi
     done
-    for proj in "$PROJECT_DIR"/*/; do
-        cfg="${proj}.mcp.json"
+    local parents=() parent prior
+    for proj in "${PROJECTS[@]}"; do
+        parent=${proj%/*}
+        [ -n "$parent" ] || parent=/
+        for prior in ${parents[@]+"${parents[@]}"}; do [ "$prior" != "$parent" ] || continue 2; done
+        parents+=("$parent")
+    done
+    # A sibling's MCP config may explicitly run one of the selected repos.
+    for parent in "${parents[@]}"; do
+      for cfg in "$parent"/*/.mcp.json; do
         [ -f "$cfg" ] || continue
-        proj="$(cd "$proj" && pwd -P)"
+        proj="$(cd "${cfg%/*}" && pwd -P)"
         if [ "$have_py" = true ]; then
             candidates+="$(mcp_json_paths "$cfg" "$proj" | tag_lines mcp)"$'\n'
         else
             candidates+="$(grep -oE '"(/|\.\.?/)[^"]+"' "$cfg" | tr -d '"' \
                 | absolutize_paths "$proj" | tag_lines mcp)"$'\n'
         fi
+      done
     done
     # Codex: only lines inside [mcp_servers.*] tables (the rest of config.toml
     # names trusted projects, which are not runtimes).
@@ -435,64 +551,64 @@ discover_runtime_projects() {
     # node_modules (`npm link`) that point into a project.
     local bindir link target npm_root=""
     if command -v npm >/dev/null 2>&1; then
-        npm_root="$(npm root -g 2>/dev/null)" || npm_root=""
+        npm_root="$(npm_config_cache="${run_dir:-${TMPDIR:-/tmp}}/npm" npm_config_logs_max=0 npm_config_update_notifier=false npm root -g 2>/dev/null)" || npm_root=""
     fi
     for bindir in "$HOME/.local/bin" "$HOME/bin" /opt/homebrew/bin /usr/local/bin \
                   ${npm_root:+"$npm_root"} ${npm_root:+"$npm_root"/@*}; do
         [ -d "$bindir" ] || continue
-        # One stat per directory (Homebrew's bin holds thousands of links);
-        # only targets that mention the project dir's name are resolved.
-        while IFS=$'\t' read -r link target; do
-            case "$target" in
-                *"/${root##*/}/"*|*"/${PROJECT_DIR##*/}/"*) ;;
-                *) continue ;;
-            esac
-            target="$(resolve_link "$link")" || continue
-            candidates+="$(echo "$target" | tag_lines linked)"$'\n'
-        done < <(find "$bindir" -maxdepth 1 -type l -exec stat -f '%N%t%Y' {} + 2>/dev/null)
+        if [ "$have_py" = true ]; then
+            candidates+="$(python3 -B - "$bindir" "${PROJECTS[@]}" <<'PYLINKS'
+import os, sys
+projects = set(sys.argv[2:])
+with os.scandir(sys.argv[1]) as entries:
+    for link in entries:
+        if link.is_symlink():
+            target = os.path.realpath(link.path)
+            parent = target
+            while parent != "/":
+                if parent in projects:
+                    print("linked\t" + target)
+                    break
+                parent = os.path.dirname(parent)
+PYLINKS
+)"$'\n'
+        else
+            while IFS=$'\t' read -r link target; do
+                case "$target" in /*) candidates+="linked"$'\t'"$target"$'\n' ;; esac
+            done < <(find "$bindir" -maxdepth 1 -type l -exec stat -f '%N%t%Y' {} + 2>/dev/null)
+        fi
     done
     # Loom's per-workspace opt-out, honoured here too so both cleaners agree.
-    for proj in "$PROJECT_DIR"/*/; do
-        if cat "${proj}.loom/config.json" "${proj}".loom-local/*.json 2>/dev/null \
+    for proj in "${PROJECTS[@]}"; do
+        if cat "$proj/.loom/config.json" "$proj"/.loom-local/*.json 2>/dev/null \
             | grep -qE '"keepBuildArtifacts"[[:space:]]*:[[:space:]]*true'; then
             candidates+="$(echo "${proj%/}" | tag_lines keepBuildArtifacts)"$'\n'
         fi
     done
     # Explicit keeps: CLEAN_KEEP_PROJECTS=name1:name2
-    local name
-    for name in $(echo "${CLEAN_KEEP_PROJECTS:-}" | tr ':' ' '); do
-        candidates+="$(echo "$PROJECT_DIR/$name" | tag_lines CLEAN_KEEP_PROJECTS)"$'\n'
+    for proj in "${PROJECTS[@]}"; do
+        case ":${CLEAN_KEEP_PROJECTS:-}:" in
+            *":${proj##*/}:"*) candidates+="CLEAN_KEEP_PROJECTS"$'\t'"$proj"$'\n' ;;
+        esac
     done
-
-    # Map each path to the top-level project it lives in.
-    local why path rel
+    local why path
     while IFS=$'\t' read -r why path; do
         [ -n "$path" ] || continue
-        case "$path" in
-            "$root"/*) rel="${path#"$root"/}" ;;
-            "$PROJECT_DIR"/*) rel="${path#"$PROJECT_DIR"/}" ;;
-            *) continue ;;
-        esac
-        name="${rel%%/*}"
-        [ -n "$name" ] && [ -d "$PROJECT_DIR/$name" ] || continue
-        case $'\n'"$RUNTIME_PROJECTS" in
-            *$'\n'"$name"$'\t'*) continue ;;
-        esac
-        RUNTIME_PROJECTS+="$name"$'\t'"$why"$'\n'
+        for proj in "${PROJECTS[@]}"; do
+            case "$path" in "$proj"|"$proj"/*) ;; *) continue ;; esac
+            case $'\n'"$RUNTIME_PROJECTS" in *$'\n'"$proj"$'\t'*) continue ;; esac
+            RUNTIME_PROJECTS+="$proj"$'\t'"$why"$'\n'
+        done
     done <<< "$candidates"
 }
 
-# Print why $1 (a path at or under a top-level project) is a runtime project,
-# and return 0; return 1 if it is not one.
 runtime_project_reason() {
-    local path="$1" rel name
-    rel="${path#"$PROJECT_DIR"/}"
-    [ "$rel" != "$path" ] || return 1
-    name="${rel%%/*}"
-    local line
-    line="$(printf '%s' "$RUNTIME_PROJECTS" | awk -F'\t' -v n="$name" '$1 == n { print $2; exit }')"
-    [ -n "$line" ] || return 1
-    echo "$line"
+    local proj why
+    while IFS=$'\t' read -r proj why; do
+        [ -n "$proj" ] || continue
+        case "$1" in "$proj"|"$proj"/*) echo "$why"; return 0 ;; esac
+    done <<< "$RUNTIME_PROJECTS"
+    return 1
 }
 
 # Remove or report removal of a file/directory
@@ -500,19 +616,23 @@ remove_item() {
     local item="$1"
     local reason="$2"
 
-    if [ ! -e "$item" ]; then
-        return
+    [ -e "$item" ] || return 0
+    local kib
+    kib=$(du -sk "$item") || { step_failed "$item" "measure $reason"; return; }
+    kib=${kib%%[[:space:]]*}
+    # Optional eligibility check runs after the (possibly long) size scan.
+    if [ "$#" -gt 2 ]; then
+        shift 2
+        "$@" || return 0
     fi
-
-    local size=$(get_size "$item")
-    local size_bytes=$(get_size_bytes "$item")
-    TOTAL_SIZE=$((TOTAL_SIZE + size_bytes))
-
-    echo "  [$reason] $item ($size)"
-
-    if [ "$CHECK_MODE" = false ]; then
-        rm -rf "$item"
+    echo "  [$reason] $item ($(bytes_to_human "$kib"))"
+    if [ "$CHECK_MODE" = true ]; then
+        record_item would_remove "$item" "$reason" "$((kib * 1024))"
+    elif rm -rf -- "$item"; then
+        record_item removed "$item" "$reason" "$((kib * 1024))"
         echo "    ✓ Removed"
+    else
+        step_failed "$item" "$reason"
     fi
 }
 
@@ -520,28 +640,39 @@ remove_item() {
 # SYSTEM CLEANUP
 # =============================================================================
 
+discover_active_worktrees
+if [ "$RUN_SYSTEM" = true ]; then
 echo "═══════════════════════════════════════════════════════════"
 echo "              SYSTEM CLEANUP"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
-# Build the safe-zone list of all live git worktrees
-discover_active_worktrees
 
-# Homebrew cleanup
-echo "📦 Cleaning Homebrew caches..."
-if [ -d "$(brew --cache)" ] 2>/dev/null && [ -n "$(ls -A "$(brew --cache)" 2>/dev/null)" ]; then
-    CACHE_SIZE=$(get_size "$(brew --cache)")
-    echo "  Current cache size: $CACHE_SIZE"
-    if [ "$CHECK_MODE" = false ]; then
-        timeout 60 brew cleanup --prune=all -s 2>/dev/null || echo "  ⚠️  Homebrew cleanup skipped (timeout or error)"
+# Measure tool-managed caches before and after a successful native prune.
+clean_cache() {
+    local path=$1 label=$2 before after
+    shift 2
+    [ -d "$path" ] || { record_item skipped "$path" "cache absent"; return; }
+    before=$(get_size_kib "$path") || { step_failed "$path" "measure cache"; return; }
+    if [ "$CHECK_MODE" = true ]; then
+        echo "  Would run: $*"
+        record_item would_remove "$path" "$label"
+    elif "$@"; then
+        after=0
+        if [ -e "$path" ]; then after=$(get_size_kib "$path") || { step_failed "$path" "measure cache"; return; }; fi
+        record_item removed "$path" "$label" "$(( before > after ? (before - after) * 1024 : 0 ))"
     else
-        echo "  Would run: brew cleanup --prune=all -s"
+        step_failed "$path" "$label"
     fi
-else
-    echo "  No Homebrew caches to clean"
+}
+
+if command -v brew >/dev/null; then
+    if cache=$(brew --cache); then
+        clean_cache "$cache" "brew cleanup" timeout 60 brew cleanup --prune=all -s
+    else
+        step_failed brew "locate Homebrew cache"
+    fi
 fi
-echo ""
 
 # npm global cache
 if command -v npm &> /dev/null; then
@@ -554,39 +685,17 @@ if command -v npm &> /dev/null; then
     echo ""
 fi
 
-# pnpm global store
-if command -v pnpm &> /dev/null; then
-    echo "📦 Cleaning pnpm global store..."
-    SIZE=$(get_size ~/Library/pnpm/store)
-    echo "  Current size: $SIZE"
-    if [ "$CHECK_MODE" = false ]; then
-        pnpm store prune 2>/dev/null || echo "  ⚠️  pnpm store cleanup skipped"
-    fi
-    echo ""
+if command -v pnpm >/dev/null; then
+    if cache=$(pnpm store path); then clean_cache "$cache" "pnpm store prune" pnpm store prune
+    else step_failed pnpm "locate store"; fi
 fi
-
-# pip cache
-if command -v pip &> /dev/null; then
-    echo "🐍 Cleaning pip cache..."
-    SIZE=$(get_size ~/Library/Caches/pip)
-    echo "  Current size: $SIZE"
-    if [ "$CHECK_MODE" = false ]; then
-        pip cache purge 2>/dev/null || echo "  ⚠️  pip cache cleanup skipped"
-    fi
-    echo ""
+if command -v pip >/dev/null; then
+    if cache=$(pip cache dir); then clean_cache "$cache" "pip cache purge" pip cache purge
+    else step_failed pip "locate cache"; fi
 fi
-
-# uv cache
-if command -v uv &> /dev/null; then
-    echo "🐍 Pruning uv cache..."
-    SIZE=$(get_size ~/.cache/uv)
-    echo "  Current size: $SIZE"
-    if [ "$CHECK_MODE" = false ]; then
-        uv cache prune 2>&1 | sed 's/^/  /' || echo "  ⚠️  uv cache prune skipped"
-    else
-        echo "  Would run: uv cache prune"
-    fi
-    echo ""
+if command -v uv >/dev/null; then
+    if cache=$(uv cache dir); then clean_cache "$cache" "uv cache prune" uv cache prune
+    else step_failed uv "locate cache"; fi
 fi
 
 # HuggingFace cache (info-only — interactive cleanup recommended)
@@ -601,15 +710,8 @@ if [ -d ~/.cache/huggingface ]; then
     fi
 fi
 
-# Bun cache (global)
-if command -v bun &> /dev/null; then
-    echo "📦 Cleaning bun cache..."
-    SIZE=$(get_size ~/Library/Caches/bun)
-    echo "  Current size: $SIZE"
-    if [ "$CHECK_MODE" = false ]; then
-        rm -rf ~/Library/Caches/bun/* 2>/dev/null || echo "  ⚠️  bun cache cleanup skipped"
-    fi
-    echo ""
+if command -v bun >/dev/null; then
+    for item in "$HOME/Library/Caches/bun"/*; do remove_item "$item" "bun cache"; done
 fi
 
 clean_shared_target
@@ -618,41 +720,59 @@ clean_shared_target
 if command -v docker &> /dev/null; then
     echo "🐳 Cleaning Docker resources..."
 
-    if ! timeout 2 docker info &>/dev/null; then
+    docker_prune() {
+        local output allocated
+        if output=$(timeout "$@"); then
+            echo "$output"
+            allocated=$(awk '/^Total reclaimed space:|^Total:/ {
+                n=$NF+0; u=$NF; sub(/^[0-9.]+/,"",u)
+                m=(u=="kB"?1e3:u=="MB"?1e6:u=="GB"?1e9:u=="TB"?1e12:1)
+                total=n*m
+            } END {printf "%.0f", total}' <<< "$output")
+            record_item removed docker "$*" "$allocated"
+        else
+            step_failed docker "$*"
+        fi
+    }
+    if ! timeout 5 docker info &>/dev/null; then
+        record_item skipped docker "engine unavailable"
         echo "  ⚠️  Docker daemon not running, skipping Docker cleanup"
         echo ""
     else
         if [ "$CHECK_MODE" = false ]; then
             echo "  Removing containers unused for >24h..."
-            CONTAINERS=$(timeout 10 docker ps -a --filter "status=exited" --filter "status=created" --format "{{.ID}} {{.CreatedAt}}" 2>/dev/null | \
-                awk -v date="$(date -u -v-1d '+%Y-%m-%d')" '$2 < date {print $1}' || echo "")
-            if [ -n "$CONTAINERS" ]; then
-                echo "$CONTAINERS" | xargs timeout 30 docker rm 2>/dev/null || echo "    No old containers to remove"
+            if ! containers=$(timeout 10 docker ps -a --filter status=exited --filter status=created --format '{{.ID}} {{.CreatedAt}}'); then
+                step_failed docker "list old containers"
             else
-                echo "    No old containers to remove"
+                while read -r id; do
+                    [ -n "$id" ] || continue
+                    if timeout 30 docker rm "$id"; then record_item removed "$id" "Docker container"
+                    else step_failed "$id" "remove Docker container"; fi
+                done < <(awk -v cutoff="$(date -u -v-1d '+%Y-%m-%d')" '$2 < cutoff {print $1}' <<< "$containers")
             fi
 
             echo "  Removing dangling images..."
-            timeout 30 docker image prune -f 2>/dev/null || echo "    Image prune skipped"
+            docker_prune 30 docker image prune -f
 
             echo "  Removing unused volumes..."
-            timeout 30 docker volume prune -f 2>/dev/null || echo "    Volume prune skipped"
+            docker_prune 30 docker volume prune -f
 
             echo "  Removing build cache >24h old..."
-            timeout 30 docker builder prune -f --filter "until=24h" 2>/dev/null || echo "    Builder prune skipped"
+            docker_prune 30 docker builder prune -f --filter "until=24h"
 
             if docker buildx version &>/dev/null; then
                 echo "  Pruning buildx cache >24h old..."
-                timeout 30 docker buildx prune -f --filter "until=24h" 2>/dev/null || echo "    Buildx prune skipped"
+                docker_prune 30 docker buildx prune -f --filter "until=24h"
             fi
 
             if [ "$AGGRESSIVE_MODE" = true ]; then
                 echo "  💥 [aggressive] docker system prune -af --volumes"
-                timeout 120 docker system prune -af --volumes 2>/dev/null || echo "    System prune skipped"
+                docker_prune 120 docker system prune -af --volumes
                 echo "  ℹ️  Note: on macOS, Docker.raw does not auto-shrink. Use Docker"
                 echo "     Desktop → Settings → Resources → 'Clean / Purge data' to reclaim."
             fi
         else
+            record_item would_remove docker "Docker resource prune"
             echo "  Would remove: containers >24h, dangling images, unused volumes, build cache"
             [ "$AGGRESSIVE_MODE" = true ] && echo "  Would also run: docker system prune -af --volumes"
         fi
@@ -674,14 +794,15 @@ if [ -d ~/Library/Caches/ms-playwright ]; then
 fi
 echo ""
 
-# System logs
-echo "🗑️  Cleaning old system logs (>30 days)..."
-SIZE=$(get_size ~/Library/Logs)
-echo "  Current size: $SIZE"
-if [ "$CHECK_MODE" = false ]; then
-    find ~/Library/Logs -type f -mtime +30 -delete 2>/dev/null || echo "  ⚠️  Log cleanup skipped"
+if [ -d "$HOME/Library/Logs" ]; then
+    if /usr/bin/find "$HOME/Library/Logs" -type f -mtime +30 -print0 > "$CLEAN_EVENT_FILE.candidates"; then
+      while IFS= read -r -d '' item; do
+        remove_item "$item" "log older than 30 days"
+      done < "$CLEAN_EVENT_FILE.candidates"
+    else
+        step_failed "$HOME/Library/Logs" "enumerate logs"
+    fi
 fi
-echo ""
 
 # Stale /tmp clones from dev tool sessions (PR reviews, issue work, etc.)
 # Detected structurally: any /private/tmp/<dir>/ that is a git repo.
@@ -693,30 +814,34 @@ echo ""
 echo "🗑️  Cleaning stale /tmp clones (>$TMP_AGE_HOURS h idle, no open handles, no WIP)..."
 for d in /private/tmp/*/; do
     d="${d%/}"
-    [ -d "$d" ] || continue
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
     [ -e "$d/.git" ] || continue
+    if [ "$EXPLICIT_PROJECTS" = true ]; then
+        keep_item "$d" "temporary clone outside workspace cleanup"
+        continue
+    fi
     git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
 
     if has_recent_activity_hours "$d" $TMP_AGE_HOURS; then
-        echo "  [SKIP recent activity] $d"
+        keep_item "$d" "recent activity"
         continue
     fi
 
     # A dir nested inside a DIFFERENT live worktree is not ours to touch; an
     # exact match means $d is itself a registered worktree — handled below.
     if is_in_active_worktree "$d" allow-self; then
-        echo "  [SKIP inside active worktree] $d"
+        keep_item "$d" "inside active worktree"
         continue
     fi
 
     if has_open_handles "$d"; then
-        echo "  [SKIP open handles] $d"
+        keep_item "$d" "open handles"
         continue
     fi
 
     # Never delete work that exists nowhere else.
     if has_unpushed_work "$d"; then
-        echo "  [KEEP uncommitted/unpushed] $d"
+        keep_item "$d" "uncommitted/unpushed"
         continue
     fi
 
@@ -724,16 +849,19 @@ for d in /private/tmp/*/; do
         # Linked worktree (`.git` is a gitdir pointer file): remove via git so
         # the parent repo's metadata stays consistent. No --force and no rm -rf
         # fallback — if git refuses (state changed since our checks), keep it.
-        size=$(get_size "$d")
+        size_kib=$(get_size_kib "$d") || { step_failed "$d" "measure worktree"; continue; }
+        size=$(bytes_to_human "$size_kib")
         echo "  [stale tmp worktree] $d ($size)"
         if [ "$CHECK_MODE" = false ]; then
             main_wt=$(git -C "$d" worktree list --porcelain 2>/dev/null \
                       | awk '/^worktree / {print substr($0,10); exit}')
             if [ -n "$main_wt" ] && (cd "$main_wt" 2>/dev/null && git worktree remove "$(cd "$d" && pwd -P)" 2>/dev/null); then
-                echo "    ✓ Removed"
+                record_item removed "$d" "stale tmp worktree" "$((size_kib * 1024))"
             else
-                echo "    ⚠️  git worktree remove refused — left in place"
+                step_failed "$d" "git worktree remove refused"
             fi
+        else
+            record_item would_remove "$d" "stale tmp worktree" "$((size_kib * 1024))"
         fi
     else
         remove_item "$d" "stale tmp clone"
@@ -745,10 +873,12 @@ echo ""
 # PROJECT CLEANUP (skip if --system-only or no project dir)
 # =============================================================================
 
-if [ "$SYSTEM_ONLY" = false ] && [ -n "$PROJECT_DIR" ]; then
+fi  # system phase
+
+if [ "$RUN_PROJECTS" = true ]; then
 
 echo "═══════════════════════════════════════════════════════════"
-echo "              PROJECT CLEANUP ($PROJECT_DIR)"
+echo "              PROJECT CLEANUP (${#PROJECTS[@]} workspaces)"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
@@ -760,7 +890,7 @@ discover_runtime_projects || true
 echo "🔌 Runtime projects (MCP servers, linked CLIs, keepBuildArtifacts) — artifacts kept:"
 if [ -n "$RUNTIME_PROJECTS" ]; then
     printf '%s' "$RUNTIME_PROJECTS" | while IFS=$'\t' read -r name why; do
-        echo "  [KEEP runtime: $why] $name"
+        keep_item "$name" "runtime: $why"
     done
 else
     echo "  (none found)"
@@ -772,7 +902,7 @@ echo ""
 # breaks the next build, which is how this was found: three repos lost their
 # deps mid-session while agents were working in them.
 echo "📦 Node.js caches (node_modules, .next) — projects idle >$NODE_MODULES_AGE_DAYS days..."
-for project in "$PROJECT_DIR"/*; do
+for project in "${PROJECTS[@]}"; do
     [ -d "$project" ] || continue
     [ -d "$project/node_modules" ] || [ -d "$project/.next" ] || continue
 
@@ -783,12 +913,12 @@ for project in "$PROJECT_DIR"/*; do
     fi
 
     if has_recent_project_activity "$project" $NODE_MODULES_AGE_DAYS; then
-        echo "  [KEEP recent activity] $pname"
+        keep_item "$project" "recent activity: ${PROJECT_ACTIVITY_REASON:-$pname}"
         continue
     fi
 
     if has_open_handles "$project"; then
-        echo "  [SKIP open handles] $pname"
+        keep_item "$project" "open handles or incomplete lsof check"
         continue
     fi
 
@@ -802,89 +932,51 @@ for project in "$PROJECT_DIR"/*; do
 done
 echo ""
 
-# Python caches — recursive, but only old + outside active worktrees + outside venv site-packages
-echo "🐍 Python caches (__pycache__, .pytest_cache, .ruff_cache, .mypy_cache) >$PYCACHE_AGE_DAYS days..."
-find "$PROJECT_DIR" \
-    \( -name "site-packages" -o -name ".venv" -o -name "venv" -o -name ".dev-venv" \
-       -o -name "node_modules" -o -name ".loom" -o -name ".claude" \) -prune \
-    -o \( -name "__pycache__" -o -name ".pytest_cache" -o -name ".ruff_cache" -o -name ".mypy_cache" \) \
-    -type d -print 2>/dev/null | while read dir; do
-    if is_in_active_worktree "$dir"; then continue; fi
-    if ! is_older_than_days "$dir" $PYCACHE_AGE_DAYS; then continue; fi
-    remove_item "$dir" "Python cache"
-done
-echo ""
-
-# Stray .pyc files outside __pycache__ dirs (legacy Python 2 / odd toolchains)
-echo "🐍 Stray .pyc files >$PYCACHE_AGE_DAYS days..."
-find "$PROJECT_DIR" \
-    \( -name "site-packages" -o -name ".venv" -o -name "venv" -o -name "__pycache__" \
-       -o -name "node_modules" -o -name ".loom" -o -name ".claude" \) -prune \
-    -o -name "*.pyc" -type f -mtime +$PYCACHE_AGE_DAYS -print 2>/dev/null \
-    | while read f; do
-        if is_in_active_worktree "$f"; then continue; fi
-        rm -f "$f" 2>/dev/null
-    done
-echo ""
-
-# Old Python virtual environments
-echo "🐍 Python virtual environments (>$VENV_AGE_DAYS days old, root + subdirs)..."
-find "$PROJECT_DIR" \
-    \( -name "node_modules" -o -name "site-packages" -o -name "target" \
-       -o -name ".loom" -o -name ".claude" \) -prune \
-    -o \( -name "venv" -o -name ".venv" -o -name ".dev-venv" -o -name "env" \) -type d -print 2>/dev/null \
-    | while read venv_path; do
-    if [ "$(basename "$venv_path")" = "env" ] && [ ! -f "$venv_path/bin/python" ]; then
+# Enumerate first so a discovery error cannot silently truncate a project pass.
+candidate_file="$CLEAN_EVENT_FILE.candidates"
+for project in "${PROJECTS[@]}"; do
+    runtime_project_reason "$project" >/dev/null && continue
+    if ! python3 -B "$SCRIPT_DIR/scripts/project-candidates.py" "$project" > "$candidate_file"; then
+        step_failed "$project" "enumerate project artifacts"
         continue
     fi
-    if is_in_active_worktree "$venv_path"; then continue; fi
-    if runtime_project_reason "$venv_path" >/dev/null; then continue; fi
-    if ! is_older_than_days "$venv_path" $VENV_AGE_DAYS; then
-        last_mod=$(stat -f "%Sm" -t "%Y-%m-%d" "$venv_path" 2>/dev/null || echo "unknown")
-        echo "  [KEEPING] $venv_path (last modified: $last_mod)"
-        continue
-    fi
-    last_mod=$(stat -f "%Sm" -t "%Y-%m-%d" "$venv_path" 2>/dev/null || echo "unknown")
-    remove_item "$venv_path" "venv (last modified: $last_mod)"
-done
-echo ""
-
-# Rust target directories — recursive for monorepos
-echo "🦀 Rust build caches (target/) >$TARGET_AGE_DAYS days, root + monorepo subdirs..."
-find "$PROJECT_DIR" \
-    \( -name "target" -o -name "vendor" -o -name ".venv" -o -name "venv" \
-       -o -name "node_modules" -o -name ".loom" -o -name ".claude" \) -prune \
-    -o -name "Cargo.toml" -type f -print 2>/dev/null \
-    | while read cargo_toml; do
-        crate_dir="$(dirname "$cargo_toml")"
-        target_dir="$crate_dir/target"
-        [ -d "$target_dir" ] || continue
-
-        if is_in_active_worktree "$target_dir"; then continue; fi
-        if runtime_project_reason "$target_dir" >/dev/null; then continue; fi
-        if ! is_older_than_days "$target_dir" $TARGET_AGE_DAYS; then continue; fi
-
-        size=$(get_size "$target_dir")
-        size_bytes=$(get_size_bytes "$target_dir")
-        TOTAL_SIZE=$((TOTAL_SIZE + size_bytes))
-
-        echo "  [Rust target] $target_dir ($size)"
-
-        if [ "$CHECK_MODE" = false ]; then
-            (cd "$crate_dir" && cargo clean 2>/dev/null) || rm -rf "$target_dir" 2>/dev/null
-            echo "    ✓ Cleaned"
+    while IFS= read -r -d '' kind && IFS= read -r -d '' item && IFS= read -r -d '' expected; do
+        case "$kind" in
+            cache) reason="Python cache"; days=$PYCACHE_AGE_DAYS ;;
+            bytecode) reason="stray .pyc"; days=$PYCACHE_AGE_DAYS ;;
+            venv) reason="venv"; days=$VENV_AGE_DAYS ;;
+            cargo) reason="Rust target"; days=$TARGET_AGE_DAYS ;;
+        esac
+        if [ -L "$item" ] || [ "$(cd "$(dirname "$item")" && pwd -P)" != "${item%/*}" ]; then
+            keep_item "$item" "symlinked artifact path"
+        elif [[ "$kind" != cargo && "$kind" != venv ]] && is_in_active_worktree "$item"; then
+            keep_item "$item" "active worktree"
+        elif ! is_older_than_days "$item" "$days"; then
+            keep_item "$item" "recent $reason"
+        elif [[ "$kind" = cargo || "$kind" = venv ]]; then
+            if has_recent_project_activity "$project" "$days"; then
+                keep_item "$item" "recent activity: $PROJECT_ACTIVITY_REASON"
+            else
+                remove_item "$item" "$reason" verify_build "$item" "$expected" "$project" "$kind" "$days"
+            fi
+        else
+            remove_item "$item" "$reason"
         fi
-    done
-echo ""
+    done < "$candidate_file"
+done
 
 clean_project_lake_builds
 
 # Java/Kotlin build directories
 echo "☕ Java/Kotlin build caches (build/, .gradle/)..."
-for project in "$PROJECT_DIR"/*; do
+for project in "${PROJECTS[@]}"; do
     [ -d "$project" ] || continue
     runtime_project_reason "$project" >/dev/null && continue
 
+    if { [ -d "$project/build" ] || [ -d "$project/.gradle" ]; } && has_open_handles "$project"; then
+        keep_item "$project" "open handles"
+        continue
+    fi
     if [ -d "$project/build" ] && [ -f "$project/build.gradle" -o -f "$project/build.gradle.kts" ]; then
         remove_item "$project/build" "Gradle build"
     fi
@@ -897,11 +989,11 @@ echo ""
 
 # Per-repo git maintenance
 echo "🌳 Per-repo git maintenance (worktree prune + gc --auto)..."
-for project in "$PROJECT_DIR"/*; do
+for project in "${PROJECTS[@]}"; do
     [ -d "$project/.git" ] || continue
     if [ "$CHECK_MODE" = false ]; then
-        (cd "$project" && git worktree prune 2>/dev/null) || true
-        (cd "$project" && git gc --auto 2>/dev/null) || true
+        git -C "$project" worktree prune || step_failed "$project" "git worktree prune"
+        git -C "$project" gc --auto || step_failed "$project" "git gc --auto"
     fi
 done
 echo ""
@@ -912,14 +1004,17 @@ echo ""
 # under .loom/worktrees/ and .claude/worktrees/.
 # =============================================================================
 
+fi  # project phase
+
+if [ "$RUN_WORKTREES" = true ]; then
 echo "═══════════════════════════════════════════════════════════"
 echo "              WORKTREE CLEANUP"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
-if ! command -v gh &> /dev/null; then
-    echo "  ⚠️  gh CLI not found, skipping worktree cleanup"
-    echo "     Install: https://cli.github.com"
+if ! command -v gh >/dev/null || ! GH_PROMPT_DISABLED=1 timeout 10 gh api user --silent </dev/null >/dev/null 2>&1; then
+    echo "  Skipping worktree cleanup: GitHub unavailable or unauthenticated"
+    record_item skipped worktrees "GitHub unavailable or unauthenticated"
     echo ""
 else
 
@@ -943,26 +1038,26 @@ worktree_is_stale_and_safe() {
     # Recursive: editing files deep in the tree doesn't bump the root mtime,
     # so root-mtime-only staleness would flag actively-used worktrees.
     if has_recent_activity_days "$wt" $WORKTREE_AGE_DAYS; then
-        echo "  [KEEP recent activity] $pname $label"
+        keep_item "$wt" "recent activity"
         return 1
     fi
 
     if has_open_handles "$wt"; then
-        echo "  [SKIP open handles] $pname $label"
+        keep_item "$wt" "open handles"
         return 1
     fi
 
     # Never delete work that exists nowhere else: uncommitted/untracked files,
     # or commits (with or without an upstream) that no remote ref contains.
     if has_unpushed_work "$wt"; then
-        echo "  [KEEP uncommitted/unpushed] $pname $label"
+        keep_item "$wt" "uncommitted/unpushed"
         return 1
     fi
 
     return 0
 }
 
-for project in "$PROJECT_DIR"/*; do
+for project in "${PROJECTS[@]}"; do
     [ -d "$project/.git" ] || continue
 
     project_name=$(basename "$project")
@@ -973,8 +1068,13 @@ for project in "$PROJECT_DIR"/*; do
     # issue-N dirs use the closed-issue check; everything else uses age-based safety.
     for worktree_root in "$project/.loom/worktrees" "$project/.claude/worktrees"; do
         [ -d "$worktree_root" ] || continue
+        if [ "$(cd "$worktree_root" && pwd -P)" != "$worktree_root" ]; then
+            keep_item "$worktree_root" "symlinked worktree root"
+            continue
+        fi
         for worktree_dir in "$worktree_root"/*; do
             [ -d "$worktree_dir" ] || continue
+            if [ -L "$worktree_dir" ]; then keep_item "$worktree_dir" "symlink"; continue; fi
             has_worktrees=true
 
             wt_name=$(basename "$worktree_dir")
@@ -984,8 +1084,8 @@ for project in "$PROJECT_DIR"/*; do
             # A dir here that is not a git tree at all is likely the residue
             # of a lost worktree registration — its files may be the only copy
             # of someone's work. Report, never delete.
-            if ! git -C "$worktree_dir" rev-parse --git-dir >/dev/null 2>&1; then
-                echo "  [KEEP not a git tree — orphaned files?] $project_name $label"
+            if [ ! -e "$worktree_dir/.git" ] || ! git -C "$worktree_dir" rev-parse --git-dir >/dev/null 2>&1; then
+                keep_item "$worktree_dir" "not a git tree"
                 wt_skipped=$((wt_skipped + 1))
                 continue
             fi
@@ -994,22 +1094,22 @@ for project in "$PROJECT_DIR"/*; do
                 # Issue worktree: only remove if the corresponding issue is CLOSED,
                 # and never with open handles or work that exists nowhere else.
                 issue_num="${wt_name#issue-}"
-                issue_state=$(cd "$project" && gh issue view "$issue_num" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+                issue_state=$(cd "$project" && timeout 10 gh issue view "$issue_num" --json state --jq '.state' 2>/dev/null) || { record_item skipped "$project#$issue_num" "issue lookup unavailable"; continue; }
 
                 if [ "$issue_state" != "CLOSED" ]; then
-                    echo "  [KEEP] $project_name $label ($issue_state)"
+                    keep_item "$worktree_dir" "issue $issue_state"
                     wt_skipped=$((wt_skipped + 1))
                     continue
                 fi
 
                 if has_open_handles "$worktree_dir"; then
-                    echo "  [SKIP open handles] $project_name $label"
+                    keep_item "$worktree_dir" "open handles"
                     wt_skipped=$((wt_skipped + 1))
                     continue
                 fi
 
                 if has_unpushed_work "$worktree_dir"; then
-                    echo "  [KEEP uncommitted/unpushed] $project_name $label"
+                    keep_item "$worktree_dir" "uncommitted/unpushed"
                     wt_skipped=$((wt_skipped + 1))
                     continue
                 fi
@@ -1023,6 +1123,7 @@ for project in "$PROJECT_DIR"/*; do
                 echo "  [STALE] $project_name $label"
             fi
 
+            size_kib=$(get_size_kib "$worktree_dir") || { step_failed "$worktree_dir" "measure worktree"; continue; }
             if [ "$CHECK_MODE" = false ]; then
                 worktree_abs="$(cd "$worktree_dir" && pwd -P)"
                 if [ -f "$worktree_dir/.git" ]; then
@@ -1030,18 +1131,19 @@ for project in "$PROJECT_DIR"/*; do
                     # if git refuses (e.g. files appeared between our checks
                     # and now), leave it for a future run.
                     if (cd "$project" && git worktree remove "$worktree_abs" 2>/dev/null); then
-                        echo "    ✓ Removed worktree"
+                        record_item removed "$worktree_dir" "worktree" "$((size_kib * 1024))"
                     else
-                        echo "    ⚠️  git worktree remove refused — left in place"
+                        step_failed "$worktree_dir" "git worktree remove refused"
                         wt_skipped=$((wt_skipped + 1))
                         continue
                     fi
                 else
                     # Stray full clone stuffed under the worktree root — it
                     # passed the WIP checks above, so plain delete is safe.
-                    rm -rf "$worktree_dir" 2>/dev/null
-                    echo "    ✓ Removed stray clone"
+                    remove_item "$worktree_dir" "stray clone"
                 fi
+            else
+                record_item would_remove "$worktree_dir" "worktree" "$((size_kib * 1024))"
             fi
             wt_cleaned=$((wt_cleaned + 1))
         done
@@ -1058,15 +1160,21 @@ for project in "$PROJECT_DIR"/*; do
                 continue
             fi
 
-            issue_state=$(cd "$project" && gh issue view "$issue_num" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+            issue_state=$(cd "$project" && timeout 10 gh issue view "$issue_num" --json state --jq '.state' 2>/dev/null) || { record_item skipped "$project#$issue_num" "issue lookup unavailable"; continue; }
 
             if [ "$issue_state" = "CLOSED" ]; then
-                echo "  [CLOSED] $project_name branch $branch"
-                if [ "$CHECK_MODE" = false ]; then
-                    (cd "$project" && git branch -D "$branch" 2>/dev/null) || true
-                    echo "    ✓ Deleted branch"
+                if [ -z "$(git -C "$project" branch -r --contains "$branch")" ]; then
+                    keep_item "$project:$branch" "commits unavailable on a remote"
+                elif [ "$CHECK_MODE" = true ]; then
+                    record_item would_remove "$project:$branch" "closed issue"
+                elif git -C "$project" branch -D "$branch"; then
+                    record_item removed "$project:$branch" "closed issue"
+                    br_cleaned=$((br_cleaned + 1))
+                else
+                    step_failed "$project:$branch" "delete closed-issue branch"
                 fi
-                br_cleaned=$((br_cleaned + 1))
+            else
+                keep_item "$project:$branch" "issue $issue_state"
             fi
         done
     fi
@@ -1076,20 +1184,16 @@ echo ""
 
 # Clean Loom tmux sessions (loom-*)
 echo "🧵 Loom tmux sessions..."
-LOOM_SESSIONS=$(tmux list-sessions 2>/dev/null | grep '^loom-' | cut -d: -f1 || true)
-
-if [ -n "$LOOM_SESSIONS" ]; then
-    echo "$LOOM_SESSIONS" | while read -r session; do
-        echo "  [tmux] $session"
-        if [ "$CHECK_MODE" = false ]; then
-            tmux kill-session -t "$session" 2>/dev/null && echo "    ✓ Killed" || true
-        fi
-        tmux_cleaned=$((tmux_cleaned + 1))
-    done
-else
-    echo "  No Loom tmux sessions found"
+if [ "$EXPLICIT_PROJECTS" = true ] || [ "$PHASE" = "--worktrees-only" ] || [ ! -t 0 ]; then
+    record_item skipped tmux "global sessions omitted from scoped or unattended runs"
+elif command -v tmux >/dev/null; then
+    while IFS= read -r session; do
+        case "$session" in loom-*) ;; *) continue ;; esac
+        if [ "$CHECK_MODE" = true ]; then record_item would_remove "$session" "Loom tmux session"
+        elif tmux kill-session -t "$session"; then record_item removed "$session" "Loom tmux session"
+        else step_failed "$session" "stop tmux session"; fi
+    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
 fi
-echo ""
 
 echo "  Worktrees removed: $wt_cleaned  Branches deleted: $br_cleaned"
 [ $wt_skipped -gt 0 ] && echo "  Worktrees kept (open/uncommitted): $wt_skipped"
@@ -1097,35 +1201,12 @@ echo ""
 
 fi  # gh CLI check
 
-fi  # SYSTEM_ONLY check
+fi  # worktree phase
 
 # =============================================================================
 # SUMMARY
 # =============================================================================
 
 [ -z "$SHARED_CARGO_SUMMARY" ] || echo "$SHARED_CARGO_SUMMARY"
-
-echo "═══════════════════════════════════════════════════════════"
-if [ "$CHECK_MODE" = true ]; then
-    echo "📊 Space Analysis"
-    echo "═══════════════════════════════════════════════════════════"
-    echo ""
-    echo "💾 Potential space savings: $(bytes_to_human $TOTAL_SIZE)"
-    echo "   (Note: Docker and worktree cleanup not included in calculation)"
-    echo ""
-    echo "Current disk usage:"
-    df -h / | tail -1 | awk '{print "  Used: " $3 " / " $2 " (" $5 ")"}'
-    echo "  Available: $(df -h / | tail -1 | awk '{print $4}')"
-    echo ""
-    echo "Run 'clean' without --check to free this space"
-else
-    echo "✅ Cleanup complete!"
-    echo "═══════════════════════════════════════════════════════════"
-    echo ""
-    echo "💾 Space freed: $(bytes_to_human $TOTAL_SIZE)"
-    echo ""
-    echo "📊 Current disk usage:"
-    df -h / | tail -1 | awk '{print "  Used: " $3 " / " $2 " (" $5 ")"}'
-    echo "  Available: $(df -h / | tail -1 | awk '{print $4}')"
-fi
-echo ""
+echo "Current disk usage:"
+df -h / | tail -1 | awk '{print "  Available: " $4 " (" $5 " used)"}'

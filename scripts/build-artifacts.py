@@ -160,6 +160,8 @@ def build_keep_reason(path, expected, kind, days=None):
         return "build is a mount point"
     owner = owning_checkout(path.parent)
     if owner:
+        if kind in ("cargo", "venv") and not (owner / ".git").is_dir():
+            return "linked checkout"
         if git(owner, "--literal-pathspecs", "ls-files", "-z", "--", str(path)):
             return "contains tracked files"
         if git(owner, "--literal-pathspecs", "ls-files", "-z", "--others",
