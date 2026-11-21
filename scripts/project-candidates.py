@@ -9,7 +9,9 @@ PRUNE = {".git", ".loom", ".claude", ".loom-local", ".lake", "target", "node_mod
 
 
 def emit(kind, path):
-    sys.stdout.buffer.write(kind.encode() + b"\0" + os.fsencode(path) + b"\0")
+    st = os.lstat(path)
+    identity = f"{st.st_dev}:{st.st_ino}".encode()
+    sys.stdout.buffer.write(b"\0".join((kind.encode(), os.fsencode(path), identity)) + b"\0")
 
 
 def walk(project):

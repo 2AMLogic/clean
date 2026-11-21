@@ -140,6 +140,34 @@ directory). Each run lists the runtime projects it found and why, under
 Tests: `/bin/bash tests/test-runtime-projects.sh` (hermetic: throwaway `HOME` and
 project dir).
 
+## Project activity, Lean, and shared Cargo builds
+
+For git checkouts, the project idle window includes the latest commit and
+recently edited tracked or non-ignored files. The age check skips background
+fetches, Loom runtime metadata, and generated build trees. A preview prints the path
+or commit that kept a project active. Other directories retain a recursive
+mtime check.
+
+The project pass finds nested Lean packages and reclaims their `.lake/build`
+once the owning checkout is idle for `CLEAN_LAKE_AGE_DAYS` (default 7) and
+has no open handles. It preserves `.lake/packages`. With an explicit workspace
+list, select a nested worktree separately to clean its artifacts.
+
+The system pass reports the allocated size of a shared Cargo target configured
+by `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, or `build.target-dir` in
+the Cargo home configuration. It recognizes Cargo-tagged target trees and
+prunes each idle profile independently, including named profiles, target
+triples, and task-specific target trees. The age threshold is
+`CLEAN_TARGET_AGE_DAYS`. An active Cargo or rustc process, recent activity
+anywhere in the profile, a nested checkout, or open handles keep the profile.
+In a primary git checkout, the project pass also recognizes idle local Cargo targets
+and Python virtual environments by their Cargo cache tag or `pyvenv.cfg`. Linked
+checkouts keep their local Cargo and venv output. These build passes check for
+tracked or non-ignored work, nested repositories and mounted filesystems.
+
+Config-file discovery uses Python’s TOML reader or `tomli`, including the copy
+shipped with the macOS developer tools’ Python 3.9.
+
 ## Worktree workflow
 
 This tool is built for workflows that use git worktrees for issue-based development (e.g., [Loom](https://github.com/rjwalters/loom)). The worktree cleanup section:
@@ -154,12 +182,6 @@ This tool is built for workflows that use git worktrees for issue-based developm
 - Directories that aren't git trees at all are reported and never deleted
   (they may be residue of a lost worktree registration)
 - Cleans up orphaned `feature/issue-*` branches for closed issues
-
-## Requirements
-
-- **Python 3.9+** for workspace discovery and summaries
-- **macOS** (uses `stat -f`, `~/Library` paths, macOS `date` flags)
-- **gh CLI** (optional, for worktree/branch cleanup)
 
 ## System diagnostics
 
@@ -227,6 +249,12 @@ For sccache, it stops the cache server and reclaims recognized cache objects
 when they total at least 1 GiB, or at any size with `--aggressive`.
 `CLEAN_SCCACHE_MIN_MIB` sets the threshold in MiB. Preview mode reports sizes
 without stopping the server.
+
+## Requirements
+
+- **Python 3.9+** for workspace discovery and summaries
+- **macOS** (uses `stat -f`, `~/Library` paths, macOS `date` flags)
+- **gh CLI** (optional, for worktree/branch cleanup)
 
 ## License
 

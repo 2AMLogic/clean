@@ -53,6 +53,8 @@ PYCACHE_AGE_DAYS=${CLEAN_PYCACHE_AGE_DAYS:-14}
 TARGET_AGE_DAYS=${CLEAN_TARGET_AGE_DAYS:-7}
 NODE_MODULES_AGE_DAYS=${CLEAN_NODE_MODULES_AGE_DAYS:-7}
 WORKTREE_AGE_DAYS=${CLEAN_WORKTREE_AGE_DAYS:-14}
+LAKE_AGE_DAYS=${CLEAN_LAKE_AGE_DAYS:-7}
+SHARED_CARGO_SUMMARY=""
 CHECK_MODE=false
 AGGRESSIVE_MODE=false
 JSON_MODE=false
@@ -145,7 +147,7 @@ fi
 die() { echo "clean: $*" >&2; exit 2; }
 
 [ "$(uname -s)" = Darwin ] || die "cleanup requires macOS; no cleanup phases were run"
-for value in "$VENV_AGE_DAYS" "$TMP_AGE_HOURS" "$PYCACHE_AGE_DAYS" "$TARGET_AGE_DAYS" "$NODE_MODULES_AGE_DAYS" "$WORKTREE_AGE_DAYS" "${CLEAN_LAKE_AGE_DAYS:-7}"; do
+for value in "$VENV_AGE_DAYS" "$TMP_AGE_HOURS" "$PYCACHE_AGE_DAYS" "$TARGET_AGE_DAYS" "$NODE_MODULES_AGE_DAYS" "$WORKTREE_AGE_DAYS" "$LAKE_AGE_DAYS"; do
     [[ "$value" =~ ^[1-9][0-9]{0,4}$ ]] || die "age thresholds must be positive decimal integers (1–99999)"
 done
 
@@ -215,7 +217,7 @@ finish() {
     local result=$?
     trap - EXIT
     python3 -B "$SCRIPT_DIR/scripts/summary.py" "$CLEAN_EVENT_FILE" "$JSON_MODE" "$CHECK_MODE" "$result" >&3 || result=$?
-    rm -f "$CLEAN_EVENT_FILE" "$CLEAN_EVENT_FILE.candidates"
+    rm -f "$CLEAN_EVENT_FILE" "$CLEAN_EVENT_FILE.candidates" "$run_dir/activity.json" "$run_dir/activity.json.dirs"
     rm -rf -- "$run_dir/npm"
     rmdir "$run_dir"
     exit "$result"
@@ -317,22 +319,7 @@ has_recent_activity_hours() {
     [ -n "$found" ]
 }
 
-# Recursive activity check for a PROJECT, ignoring its own regenerable build
-# artifacts. Asking "is node_modules old?" answers the wrong question: its
-# mtime is stamped at install time and never bumped by use, so a tree installed
-# months ago and built against hourly looks stale. Ask instead whether the
-# PROJECT has been touched, which is what makes its dependencies load-bearing.
-# Heavy artifact dirs are pruned so the scan stays cheap and so a stale build
-# output cannot masquerade as activity; .git is deliberately NOT pruned, since
-# commits and fetches are activity (same rule has_recent_activity_days uses).
-has_recent_project_activity() {
-    local project="$1"
-    local days="$2"
-    [ -n "$(find "$project" \
-        \( -name node_modules -o -name .next -o -name target -o -name .venv \
-           -o -name venv -o -name .lake -o -name .gradle \) -prune \
-        -o -mtime -"$days" -print -quit 2>/dev/null)" ]
-}
+source "$SCRIPT_DIR/scripts/build-artifacts.sh"
 
 # Returns 0 (true) if the git repo/worktree at $1 holds work that exists
 # nowhere else: uncommitted/untracked files, commits ahead of upstream, or —
@@ -633,16 +620,28 @@ runtime_project_reason() {
 # Remove or report removal of a file/directory
 remove_item() {
     local item="$1"
-    local reason="$2"
+    local reason="$2" parent before="" after
 
     [ -e "$item" ] || return 0
     local kib
     kib=$(du -sk "$item") || { step_failed "$item" "measure $reason"; return; }
     kib=${kib%%[[:space:]]*}
+    # Optional eligibility check runs after the (possibly long) size scan.
+    if [ "$#" -gt 2 ]; then
+        shift 2
+        "$@" || return 0
+    fi
     echo "  [$reason] $item ($(bytes_to_human "$kib"))"
+    if [ -n "${CLEAN_ACTIVITY_SNAPSHOT:-}" ] && [ ! -e "$project/.git" ]; then
+        parent=${item%/*}
+        before=$(/usr/bin/stat -f '%d %i %.9Fm' "$parent") || before=""
+    fi
     if [ "$CHECK_MODE" = true ]; then
         record_item would_remove "$item" "$reason" "$((kib * 1024))"
     elif rm -rf -- "$item"; then
+        if [ -n "$before" ] && after=$(/usr/bin/stat -f '%d %i %.9Fm' "$parent") && [ "${before% *}" = "${after% *}" ]; then
+            printf '%s %s\n' "$before" "${after##* }" >> "$CLEAN_ACTIVITY_SNAPSHOT.dirs"
+        fi
         record_item removed "$item" "$reason" "$((kib * 1024))"
         echo "    ✓ Removed"
     else
@@ -654,6 +653,7 @@ remove_item() {
 # SYSTEM CLEANUP
 # =============================================================================
 
+unset CLEAN_ACTIVITY_SNAPSHOT
 discover_active_worktrees
 if [ "$RUN_SYSTEM" = true ]; then
 echo "═══════════════════════════════════════════════════════════"
@@ -729,6 +729,8 @@ fi
 if command -v bun >/dev/null; then
     for item in "$HOME/Library/Caches/bun"/*; do remove_item "$item" "bun cache"; done
 fi
+
+clean_shared_target
 
 # Docker cleanup
 if command -v docker &> /dev/null; then
@@ -891,6 +893,13 @@ fi  # system phase
 
 if [ "$RUN_PROJECTS" = true ]; then
 
+if [ "$CHECK_MODE" = false ]; then
+    CLEAN_ACTIVITY_SNAPSHOT="$run_dir/activity.json"
+    export CLEAN_ACTIVITY_SNAPSHOT
+    python3 -B "$SCRIPT_DIR/scripts/build-artifacts.py" snapshot "${PROJECTS[@]}" > "$CLEAN_ACTIVITY_SNAPSHOT"
+    : > "$CLEAN_ACTIVITY_SNAPSHOT.dirs"
+fi
+
 echo "═══════════════════════════════════════════════════════════"
 echo "              PROJECT CLEANUP (${#PROJECTS[@]} workspaces)"
 echo "═══════════════════════════════════════════════════════════"
@@ -954,7 +963,7 @@ for project in "${PROJECTS[@]}"; do
         step_failed "$project" "enumerate project artifacts"
         continue
     fi
-    while IFS= read -r -d '' kind && IFS= read -r -d '' item; do
+    while IFS= read -r -d '' kind && IFS= read -r -d '' item && IFS= read -r -d '' expected; do
         case "$kind" in
             cache) reason="Python cache"; days=$PYCACHE_AGE_DAYS ;;
             bytecode) reason="stray .pyc"; days=$PYCACHE_AGE_DAYS ;;
@@ -963,21 +972,23 @@ for project in "${PROJECTS[@]}"; do
         esac
         if [ -L "$item" ] || [ "$(cd "$(dirname "$item")" && pwd -P)" != "${item%/*}" ]; then
             keep_item "$item" "symlinked artifact path"
-        elif is_in_active_worktree "$item"; then
+        elif [[ "$kind" != cargo && "$kind" != venv ]] && is_in_active_worktree "$item"; then
             keep_item "$item" "active worktree"
         elif ! is_older_than_days "$item" "$days"; then
             keep_item "$item" "recent $reason"
-        elif { [ "$kind" = cargo ] || [ "$kind" = venv ]; } && has_recent_project_activity "$project" "$days"; then
-            keep_item "$item" "recent activity: ${PROJECT_ACTIVITY_REASON:-$project}"
-        elif [ "$kind" = cargo ] && { has_recent_activity_days "$item" "$days" || has_open_handles "$item"; }; then
-            keep_item "$item" "recent or open build artifacts"
+        elif [[ "$kind" = cargo || "$kind" = venv ]]; then
+            if has_recent_project_activity "$project" "$days"; then
+                keep_item "$item" "recent activity: $PROJECT_ACTIVITY_REASON"
+            else
+                remove_item "$item" "$reason" verify_build "$item" "$expected" "$project" "$kind" "$days"
+            fi
         else
-            # The target path was identified above; cargo clean could honor a
-            # different shared or workspace-specific target-dir configuration.
             remove_item "$item" "$reason"
         fi
     done < "$candidate_file"
 done
+
+clean_project_lake_builds
 
 # Java/Kotlin build directories
 echo "☕ Java/Kotlin build caches (build/, .gradle/)..."
@@ -1016,6 +1027,7 @@ echo ""
 # under .loom/worktrees/ and .claude/worktrees/.
 # =============================================================================
 
+unset CLEAN_ACTIVITY_SNAPSHOT
 fi  # project phase
 
 if [ "$RUN_WORKTREES" = true ]; then
@@ -1228,5 +1240,6 @@ fi
 # SUMMARY
 # =============================================================================
 
+[ -z "$SHARED_CARGO_SUMMARY" ] || echo "$SHARED_CARGO_SUMMARY"
 echo "Current disk usage:"
 df -h / | tail -1 | awk '{print "  Available: " $4 " (" $5 " used)"}'
