@@ -45,6 +45,8 @@ PYCACHE_AGE_DAYS=14          # __pycache__ etc must be at least this old
 TARGET_AGE_DAYS=7            # rust target dirs must be at least this old
 NODE_MODULES_AGE_DAYS=7      # project must be idle this long before node_modules/.next go
 WORKTREE_AGE_DAYS=14         # non-issue agent worktrees must be at least this old
+LAKE_AGE_DAYS=${CLEAN_LAKE_AGE_DAYS:-7}
+SHARED_CARGO_SUMMARY=""
 CHECK_MODE=false
 AGGRESSIVE_MODE=false
 SYSTEM_ONLY=false
@@ -212,22 +214,7 @@ has_recent_activity_hours() {
     [ -n "$(find "$dir" -mmin -"$(( hours * 60 ))" -print -quit 2>/dev/null)" ]
 }
 
-# Recursive activity check for a PROJECT, ignoring its own regenerable build
-# artifacts. Asking "is node_modules old?" answers the wrong question: its
-# mtime is stamped at install time and never bumped by use, so a tree installed
-# months ago and built against hourly looks stale. Ask instead whether the
-# PROJECT has been touched, which is what makes its dependencies load-bearing.
-# Heavy artifact dirs are pruned so the scan stays cheap and so a stale build
-# output cannot masquerade as activity; .git is deliberately NOT pruned, since
-# commits and fetches are activity (same rule has_recent_activity_days uses).
-has_recent_project_activity() {
-    local project="$1"
-    local days="$2"
-    [ -n "$(find "$project" \
-        \( -name node_modules -o -name .next -o -name target -o -name .venv \
-           -o -name venv -o -name .lake -o -name .gradle \) -prune \
-        -o -mtime -"$days" -print -quit 2>/dev/null)" ]
-}
+source "$SCRIPT_DIR/scripts/build-artifacts.sh"
 
 # Returns 0 (true) if the git repo/worktree at $1 holds work that exists
 # nowhere else: uncommitted/untracked files, commits ahead of upstream, or —
@@ -625,6 +612,8 @@ if command -v bun &> /dev/null; then
     echo ""
 fi
 
+clean_shared_target
+
 # Docker cleanup
 if command -v docker &> /dev/null; then
     echo "🐳 Cleaning Docker resources..."
@@ -888,6 +877,8 @@ find "$PROJECT_DIR" \
     done
 echo ""
 
+clean_project_lake_builds
+
 # Java/Kotlin build directories
 echo "☕ Java/Kotlin build caches (build/, .gradle/)..."
 for project in "$PROJECT_DIR"/*; do
@@ -1111,6 +1102,8 @@ fi  # SYSTEM_ONLY check
 # =============================================================================
 # SUMMARY
 # =============================================================================
+
+[ -z "$SHARED_CARGO_SUMMARY" ] || echo "$SHARED_CARGO_SUMMARY"
 
 echo "═══════════════════════════════════════════════════════════"
 if [ "$CHECK_MODE" = true ]; then

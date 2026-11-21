@@ -140,3 +140,25 @@ This tool is built for workflows that use git worktrees for issue-based developm
 ## License
 
 MIT
+
+### Project activity, Lean, and shared Cargo builds
+
+For git checkouts, the project idle window includes the latest commit and
+recently edited tracked or non-ignored files. Background fetches, Loom runtime
+state, and generated build trees do not reset it. A preview prints the path
+or commit that kept a project active. Other directories retain a recursive
+mtime check.
+
+The project pass finds nested Lean packages and reclaims their `.lake/build`
+once the owning checkout is idle for `CLEAN_LAKE_AGE_DAYS` (default 7) and
+has no open handles. It preserves `.lake/packages`. With an explicit workspace
+list, select a nested worktree separately to clean its artifacts.
+
+The system pass reports the allocated size of a shared Cargo target configured
+by `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, or `build.target-dir` in
+the Cargo home configuration. It recognizes Cargo-tagged target trees and
+prunes each idle profile independently, including named profiles, target
+triples, and task-specific target trees. The age threshold is
+`CLEAN_TARGET_AGE_DAYS`. An active Cargo or rustc process, recent activity
+anywhere in the profile, a nested checkout, or open handles keep the profile.
+Config-file discovery uses Python 3.11+ or the `tomli` module on older Python.
