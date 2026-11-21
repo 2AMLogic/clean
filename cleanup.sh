@@ -691,7 +691,12 @@ python3 -B "$SCRIPT_DIR/scripts/system_sweep.py" "${sweep_args[@]}" || step_fail
 echo ""
 
 if command -v pnpm >/dev/null; then
-    if cache=$(pnpm store path); then clean_cache "$cache" "pnpm store prune" pnpm store prune
+    if [ "$CHECK_MODE" = true ]; then
+        # Even 'pnpm store path' can create a new store. Prune itself knows
+        # which objects are reclaimable only when it runs.
+        echo "  Would run: pnpm store prune (reclaimable size unknown)"
+        record_item would_remove pnpm "pnpm store prune; reclaimable size unknown"
+    elif cache=$(pnpm store path); then clean_cache "$cache" "pnpm store prune" pnpm store prune
     else step_failed pnpm "locate store"; fi
 fi
 if command -v pip >/dev/null; then
