@@ -127,6 +127,31 @@ class SweepTests(unittest.TestCase):
             scratch.scratch_areas(True, self.processes, 7, 3, 7)
             sweep.assert_any_call(self.root, "tmp", 7, True, self.processes)
 
+    def test_current_journal_cannot_satisfy_temp_recency_guard(self):
+        old = self.folder("old.tmp")
+        private = self.root / "clean-events.fixture"
+        private.mkdir()
+        with mock.patch.dict(os.environ, CLEAN_EVENT_FILE=str(private / "events")):
+            self.sweep(kind="tmp")
+        self.assertTrue(old.exists())
+        self.assertIn(b"no recent entries", (private / "events").read_bytes())
+
+    def test_inaccessible_session_root_preserves_other_sweeps(self):
+        claude = Path("/private/tmp") / f"claude-{os.getuid()}"
+        is_dir = Path.is_dir
+
+        def deny_session(path):
+            if path == claude:
+                raise PermissionError("unreadable root")
+            return is_dir(path)
+        with mock.patch.object(Path, "is_dir", deny_session), mock.patch.dict(
+                os.environ, TMPDIR="", CLEAN_SCRATCH_ROOTS=str(self.root)), mock.patch(
+                    "scratch.subprocess.run", return_value=subprocess.CompletedProcess([], 1, b"", b"")), mock.patch(
+                    "scratch.sweep") as sweep:
+            scratch.scratch_areas(True, self.processes, 7, 3, 7)
+        sweep.assert_called_once_with(self.root, "scratch", 7, True, self.processes)
+        self.assertIn(b"inspection denied", self.events.read_bytes())
+
     def test_empty_cache_preview_never_invokes_npm_or_go(self):
         with mock.patch.dict(os.environ, {"GOCACHE": "", "NPM_CONFIG_CACHE": "", "npm_config_cache": ""}), \
              mock.patch("system_sweep.shutil.which", return_value="/usr/local/bin/installed"), \

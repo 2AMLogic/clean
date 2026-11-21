@@ -201,7 +201,13 @@ def sweep(root, kind, days, preview, processes):
     pending = []
     groups = defaultdict(lambda: [0, 0])
     kept_recent = 0
+    journal = os.environ.get("CLEAN_EVENT_FILE")
+    journal_dir = Path(journal).resolve().parent if journal else None
     for path in candidates(root, kind):
+        # Our own fresh journal cannot establish that an otherwise stale
+        # system temp directory passes its recent-activity sanity check.
+        if path == journal_dir:
+            continue
         if exclusion(path.name) or path.is_symlink() or not (path.is_dir() or path.is_file()):
             event("kept", path, "protected name or file type", quiet=kind == "tmp")
             continue
@@ -286,26 +292,38 @@ def scratch_areas(preview, processes, tmp_days, session_days, scratch_days):
     system = os.fsdecode(system_tmp.stdout).strip() if system_tmp.returncode == 0 else ""
     temp = os.environ.get("TMPDIR") or system
     seen = set()
+    def sweep_root(path, kind, days):
+        try:
+            root = path.resolve()
+            if root in seen or root == Path("/tmp").resolve():
+                return
+            sweep(path, kind, days, preview, processes)
+            seen.add(root)
+        except PermissionError as exc:
+            event("skipped", path, f"inspection denied: {exc}")
+
     if temp and os.path.isabs(temp):
         # Only the OS-designated per-user temporary directory is eligible for
         # broad sweeping. A custom TMPDIR gets the narrower configured-root rules.
         root = Path(temp).resolve()
         kind = "tmp" if system and root == Path(system).resolve() else "scratch"
-        if root != Path("/tmp").resolve():
-            sweep(root, kind, tmp_days, preview, processes)
-            seen.add(root)
+        sweep_root(root, kind, tmp_days)
+
     claude = Path("/private/tmp") / f"claude-{os.getuid()}"
-    if claude.is_dir() and not claude.is_symlink() and claude.stat().st_uid == os.getuid():
-        for project in claude.iterdir():
-            if project.is_dir() and not project.is_symlink() and project.stat().st_uid == os.getuid():
-                sweep(project, "session", session_days, preview, processes)
+    try:
+        if claude.is_dir() and not claude.is_symlink() and claude.stat().st_uid == os.getuid():
+            for project in claude.iterdir():
+                try:
+                    if project.is_dir() and not project.is_symlink() and project.stat().st_uid == os.getuid():
+                        sweep_root(project, "session", session_days)
+                except PermissionError as exc:
+                    event("skipped", project, f"inspection denied: {exc}")
+    except PermissionError as exc:
+        event("skipped", claude, f"inspection denied: {exc}")
+
     for value in os.environ.get("CLEAN_SCRATCH_ROOTS", "").split(os.pathsep):
         if not value:
             continue
         if not os.path.isabs(value):
             raise ValueError("CLEAN_SCRATCH_ROOTS requires absolute paths")
-        root = Path(value)
-        if root.resolve() in seen or root.resolve() == Path("/tmp").resolve():
-            continue  # /private/tmp git clones have a separate pass
-        sweep(root, "scratch", scratch_days, preview, processes)
-        seen.add(root.resolve())
+        sweep_root(Path(value), "scratch", scratch_days)
