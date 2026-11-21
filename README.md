@@ -96,18 +96,41 @@ Override with:
 CLEAN_PROJECT_DIR=~/code clean
 ```
 
+## Scheduled fleet runs
+
+Select exact workspaces with repeatable `--project DIR` flags or a colon-separated
+`CLEAN_PROJECTS` list. Both forms can be combined. Select a single phase with
+`--projects-only`, `--worktrees-only` or `--system-only`. The default runs all
+three phases. The system phase operates on host caches. Global tmux sessions
+are skipped in scoped or unattended runs. Worktree cleanup skips GitHub lookups
+when authentication or the network is unavailable.
+
+```sh
+clean --projects-only --project /work/app --project '/work/tool kit' --check --json
+CLEAN_PROJECTS=/work/app:/work/tool CLEAN_TARGET_AGE_DAYS=14 clean --projects-only --json
+```
+
+With `--json`, progress goes to stderr and stdout contains one JSON object
+with `exit_code`, `check`, `bytes_freed`, `bytes_reclaimable` and `items`.
+Each item has a path, reason, byte count and status (`removed`, `would_remove`,
+`kept`, `skipped` or `failed`). Totals use measured allocated sizes and tool
+reports. A native prune with no available estimate contributes zero bytes.
+Failed cleanup steps return nonzero. Invalid options, unsupported platforms,
+and unavailable prerequisites exit before cleanup. Rust targets in active
+projects remain protected regardless of size.
+
 ## Configuration
 
-Edit the variables at the top of `cleanup.sh`:
+Override thresholds through the environment. Use positive integers from 1 to 99999.
 
 | Variable | Default | Description |
 |---|---|---|
-| `VENV_AGE_DAYS` | `7` | Min age before cleaning virtualenvs |
-| `NODE_MODULES_AGE_DAYS` | `7` | Min idle time (recursive, of the **project**) before cleaning `node_modules`/`.next` |
-| `TMP_AGE_HOURS` | `1` | Min idle time (recursive) before cleaning /tmp clones |
-| `WORKTREE_AGE_DAYS` | `14` | Min idle time (recursive) before cleaning agent worktrees |
-| `PYCACHE_AGE_DAYS` | `14` | Min age before cleaning Python caches |
-| `TARGET_AGE_DAYS` | `7` | Min age before cleaning Rust target dirs |
+| `CLEAN_VENV_AGE_DAYS` | `7` | Min age before cleaning virtualenvs |
+| `CLEAN_NODE_MODULES_AGE_DAYS` | `7` | Min idle time (recursive, of the **project**) before cleaning `node_modules`/`.next` |
+| `CLEAN_TMP_AGE_HOURS` | `1` | Min idle time (recursive) before cleaning /tmp clones |
+| `CLEAN_WORKTREE_AGE_DAYS` | `14` | Min idle time (recursive) before cleaning agent worktrees |
+| `CLEAN_PYCACHE_AGE_DAYS` | `14` | Min age before cleaning Python caches |
+| `CLEAN_TARGET_AGE_DAYS` | `7` | Min age before cleaning Rust target dirs |
 
 To keep a project's artifacts that detection misses, set
 `CLEAN_KEEP_PROJECTS=name1:name2` (top-level names under the project
@@ -134,6 +157,7 @@ This tool is built for workflows that use git worktrees for issue-based developm
 
 ## Requirements
 
+- **Python 3.9+** for workspace discovery and summaries
 - **macOS** (uses `stat -f`, `~/Library` paths, macOS `date` flags)
 - **gh CLI** (optional, for worktree/branch cleanup)
 
