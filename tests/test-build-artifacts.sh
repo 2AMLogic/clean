@@ -169,4 +169,40 @@ touch -t 200101010000 "$project/source.c"
 run_project
 [ ! -d "$project/proofs/.lake/build" ]
 [ -d "$project/proofs/.lake/packages" ]
+# Git primaries can reclaim recognized, ignored Cargo and venv output. Linked
+# checkouts and directories with the right name but no build metadata are kept.
+echo '[package]' > "$project/Cargo.toml"
+git -C "$project" add Cargo.toml
+GIT_AUTHOR_DATE=2001-01-03T00:00:00Z GIT_COMMITTER_DATE=2001-01-03T00:00:00Z git -C "$project" commit -qm 'package'
+touch -t 200101010000 "$project/Cargo.toml"
+mkdir -p "$project/.venv" "$project/target/debug"
+echo 'environment' > "$project/.venv/pyvenv.cfg"
+echo 'compiled' > "$project/target/debug/package"
+cp "$shared/CACHEDIR.TAG" "$project/target/CACHEDIR.TAG"
+find "$project/.venv" "$project/target" -exec touch -t 200101010000 {} +
+printf '#!/bin/sh\nexit 1\n' > "$fixture/bin/pgrep"
+chmod +x "$fixture/bin/pgrep"
+run_project --check
+python3 - "$fixture/run.json" "$project" <<'PYTEST'
+import json, pathlib, sys
+data = json.load(open(sys.argv[1]))
+candidates = {i["path"] for i in data["items"] if i["status"] == "would_remove"}
+assert all(str(pathlib.Path(sys.argv[2], d)) in candidates for d in (".venv", "target")), data
+PYTEST
+orig_project="$project"
+project="$fixture/linked"
+git -C "$orig_project" worktree add --quiet --detach "$project" HEAD
+mkdir -p "$project/.venv" "$project/target/debug"
+cp "$orig_project/.venv/pyvenv.cfg" "$project/.venv/"
+cp "$shared/CACHEDIR.TAG" "$project/target/"
+find "$project" -exec touch -t 200101010000 {} +
+run_project
+[ -d "$project/.venv" ] && [ -d "$project/target" ]
+project="$orig_project"
+run_project
+[ ! -d "$project/.venv" ] && [ ! -d "$project/target" ]
+mkdir -p "$project/.venv" "$project/target"
+find "$project/.venv" "$project/target" -exec touch -t 200101010000 {} +
+run_project
+[ -d "$project/.venv" ] && [ -d "$project/target" ]
 echo 'Project activity, Lake builds, and shared Cargo target fixtures passed.'

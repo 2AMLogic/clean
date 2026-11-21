@@ -185,5 +185,10 @@ prunes each idle profile independently, including named profiles, target
 triples, and task-specific target trees. The age threshold is
 `CLEAN_TARGET_AGE_DAYS`. An active Cargo or rustc process, recent activity
 anywhere in the profile, a nested checkout, or open handles keep the profile.
+In a primary git checkout, the project pass also recognizes idle local Cargo targets
+and Python virtual environments by their Cargo cache tag or `pyvenv.cfg`. Linked
+checkouts keep their local Cargo and venv output. These build passes check for
+tracked or non-ignored work, nested repositories and mounted filesystems.
+
 Config-file discovery uses Python’s TOML reader or `tomli`, including the copy
 shipped with the macOS developer tools’ Python 3.9.

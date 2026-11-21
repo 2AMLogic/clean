@@ -40,7 +40,8 @@ def activity(project, days):
     if days < 1:
         raise ValueError("the project activity threshold must be positive")
     cutoff = time.time() - days * 86400
-    if not os.path.lexists(project / ".git"):
+    checkout = owning_checkout(project)
+    if checkout is None:
         # Outside git even a recent empty directory can represent ongoing work.
         for root, dirs, files in os.walk(project, onerror=raise_error):
             dirs[:] = [d for d in dirs if d not in BUILD_DIRS]
@@ -49,6 +50,7 @@ def activity(project, days):
                     return "path " + str(path.relative_to(project))
         return ""
 
+    project = checkout
     # log is indifferent to a background fetch or a refreshed index. For an
     # unborn HEAD we keep the tree until its first commit gives us a baseline.
     commit = git(project, "log", "-1", "--format=%ct %h").decode().split()
@@ -160,6 +162,8 @@ def build_keep_reason(path, expected, kind, days=None):
         return "build is a mount point"
     owner = owning_checkout(path.parent)
     if owner:
+        if git(owner, "rev-parse", "--show-toplevel") != os.fsencode(owner) + b"\n":
+            return "unable to confirm the owning checkout"
         if kind in ("cargo", "venv") and not (owner / ".git").is_dir():
             return "linked checkout"
         if git(owner, "--literal-pathspecs", "ls-files", "-z", "--", str(path)):
