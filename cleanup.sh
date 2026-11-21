@@ -52,6 +52,11 @@ TOTAL_SIZE=0
 ACTIVE_WORKTREES=""
 
 # Parse arguments
+if [ "${1:-}" = schedule ]; then
+    shift
+    exec python3 -B "$SCRIPT_DIR/scripts/schedule.py" "$@"
+fi
+
 if [ "$1" = "--version" ] || [ "$1" = "-V" ]; then
     echo "clean $VERSION"
     exit 0
@@ -61,6 +66,7 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "clean $VERSION — aggressive but safe disk cleanup for macOS dev machines"
     echo ""
     echo "Usage: clean [options]"
+    echo "       clean schedule install [--interval-hours N] | status | uninstall"
     echo ""
     echo "Designed for developers working with lots of git worktrees."
     echo ""
@@ -630,7 +636,7 @@ if command -v docker &> /dev/null; then
     echo "🐳 Cleaning Docker resources..."
 
     if ! timeout 2 docker info &>/dev/null; then
-        echo "  ⚠️  Docker daemon not running, skipping Docker cleanup"
+        echo "  Docker engine unreachable. Check free space on its data volume below before restarting Docker."
         echo ""
     else
         if [ "$CHECK_MODE" = false ]; then
@@ -1111,6 +1117,15 @@ fi  # SYSTEM_ONLY check
 # =============================================================================
 # SUMMARY
 # =============================================================================
+
+if [ "$RUN_SYSTEM" = true ]; then
+    if command -v python3 >/dev/null; then
+        python3 -B "$SCRIPT_DIR/scripts/system_report.py" "${PROJECTS[@]}" || step_failed "system report" "diagnostics failed"
+    else
+        echo "  System diagnostics skipped: python3 unavailable"
+        record_item skipped "system report" "python3 unavailable"
+    fi
+fi
 
 echo "═══════════════════════════════════════════════════════════"
 if [ "$CHECK_MODE" = true ]; then
