@@ -138,6 +138,7 @@ if [ "$SYSTEM_ONLY" = false ] && [ -z "$PROJECT_DIR" ]; then
 fi
 
 if [ "$CHECK_MODE" = true ]; then
+    export GIT_OPTIONAL_LOCKS=0  # git status may otherwise refresh a worktree index
     echo "🔍 Checking potential space savings..."
     echo ""
 else
@@ -828,14 +829,13 @@ echo ""
 
 # Stray .pyc files outside __pycache__ dirs (legacy Python 2 / odd toolchains)
 echo "🐍 Stray .pyc files >$PYCACHE_AGE_DAYS days..."
-find "$PROJECT_DIR" \
+while IFS= read -r -d '' f; do
+    if is_in_active_worktree "$f"; then continue; fi
+    remove_item "$f" "stray .pyc"
+done < <(find "$PROJECT_DIR" \
     \( -name "site-packages" -o -name ".venv" -o -name "venv" -o -name "__pycache__" \
        -o -name "node_modules" -o -name ".loom" -o -name ".claude" \) -prune \
-    -o -name "*.pyc" -type f -mtime +$PYCACHE_AGE_DAYS -print 2>/dev/null \
-    | while read f; do
-        if is_in_active_worktree "$f"; then continue; fi
-        rm -f "$f" 2>/dev/null
-    done
+    -o -name "*.pyc" -type f -mtime +"$PYCACHE_AGE_DAYS" -print0)
 echo ""
 
 # Old Python virtual environments
