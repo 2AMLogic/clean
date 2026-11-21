@@ -45,8 +45,17 @@ def install(plist, log, domain, interval):
     paths += ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/usr/local/bin"]
     env = {k: v for k, v in os.environ.items() if k in (
         "CLEAN_LOW_DISK_GIB", "CLEAN_PROJECT_DIR", "CLEAN_PROJECTS", "CLEAN_KEEP_PROJECTS",
-        "CLEAN_SCRATCH_ROOTS", "CLEAN_DOCKER_SEARCH_ROOTS", "CARGO_TARGET_DIR"
+        "CLEAN_SCRATCH_ROOTS", "CLEAN_SCRATCH_PATTERN", "CLEAN_DOCKER_SEARCH_ROOTS",
+        "CLEAN_SCCACHE_MIN_MIB", "CARGO_TARGET_DIR", "CARGO_HOME", "SCCACHE_DIR", "GOCACHE",
+        "GOENV", "ELAN_HOME", "RUSTUP_HOME", "npm_config_cache", "NPM_CONFIG_CACHE"
     ) or (k.startswith("CLEAN_") and k.endswith(("_DAYS", "_HOURS")))}
+    # launchd normally starts jobs from /. Preserve the meaning of workspace
+    # paths that were relative to the directory where install was invoked.
+    if env.get("CLEAN_PROJECT_DIR"):
+        env["CLEAN_PROJECT_DIR"] = os.path.abspath(env["CLEAN_PROJECT_DIR"])
+    if env.get("CLEAN_PROJECTS"):
+        env["CLEAN_PROJECTS"] = os.pathsep.join(
+            os.path.abspath(p) if p else "" for p in env["CLEAN_PROJECTS"].split(os.pathsep))
     env.update(PATH=os.pathsep.join(dict.fromkeys(paths)), GH_PROMPT_DISABLED="1",
                GIT_TERMINAL_PROMPT="0", HOMEBREW_NO_AUTO_UPDATE="1")
     desired = plistlib.dumps({
