@@ -161,10 +161,6 @@ This tool is built for workflows that use git worktrees for issue-based developm
 - **macOS** (uses `stat -f`, `~/Library` paths, macOS `date` flags)
 - **gh CLI** (optional, for worktree/branch cleanup)
 
-## License
-
-MIT
-
 ## System diagnostics
 
 The system phase reports swap and memory pressure, executables with more than
@@ -204,3 +200,34 @@ Set `CLEAN_LOW_DISK_GIB` (default 30) before installation to change the warning
 threshold shared by the schedule and Docker report. Reinstall to update the
 interval or captured cleanup settings. Scheduling and system diagnostics
 require Python 3.
+
+## Scratch directories and package caches
+
+System cleanup inspects Claude session directories under `/private/tmp/claude-<uid>`,
+the macOS user temporary directory, and any roots listed in `CLEAN_SCRATCH_ROOTS`
+(colon-separated absolute paths). Use `--check` to see individual session sizes
+and candidate counts and sizes grouped by prefix. The default idle thresholds
+are 3 days for Claude sessions and 7 days for temporary directories, additional
+scratch roots, and npx entries. Set `CLEAN_SESSION_AGE_DAYS`,
+`CLEAN_TMP_AGE_DAYS`, `CLEAN_SCRATCH_AGE_DAYS`, or `CLEAN_NPX_AGE_DAYS`
+to override them.
+
+Additional roots and custom temporary directories consider directories with a
+dot followed by a 6–16 character alphanumeric suffix containing mixed case or
+both letters and digits. For a different naming convention, set
+`CLEAN_SCRATCH_PATTERN` to a shell-style name pattern such as `review-*.tmp`.
+Only the OS-designated user temp directory receives the broader sweep. Scratch
+entries must be user-owned, recursively idle, clear of open handles and process
+command lines, and free of local Git work. Mount points, sockets, linked
+worktrees, and entries that cannot be inspected are kept.
+
+The system pass reports npm's content cache and npx cache separately. It prunes
+idle npx hash directories and runs `go clean -cache` when Go is installed.
+For sccache, it stops the cache server and reclaims recognized cache objects
+when they total at least 1 GiB, or at any size with `--aggressive`.
+`CLEAN_SCCACHE_MIN_MIB` sets the threshold in MiB. Preview mode reports sizes
+without stopping the server.
+
+## License
+
+MIT

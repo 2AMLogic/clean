@@ -76,6 +76,20 @@ class Fleet(unittest.TestCase):
         self.assertIn("requires macOS", refused.stderr)
         self.assertTrue((self.project / "old file.pyc").exists())
 
+    def test_pnpm_preview_never_initializes_store(self):
+        self.stub("pnpm", 'touch "$HOME/pnpm-was-invoked"')
+        # The scratch scanner has its own fixture suite. Keep this system
+        # preview from traversing the host's /private/tmp clones or sessions.
+        self.stub("python3", 'case "$*" in *system_sweep.py*|*system_report.py*) exit 0;; esac\n'
+                  'exec /usr/bin/python3 "$@"')
+        self.stub("git", 'case "$*" in *"/private/tmp/"*) exit 1;; esac\nexec /usr/bin/git "$@"')
+        preview = self.cli("--system-only", "--check", "--json")
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        items = json.loads(preview.stdout)["items"]
+        self.assertTrue(any(item["status"] == "would_remove" and "pnpm store prune" in item["reason"]
+                            for item in items))
+        self.assertFalse((self.root / "pnpm-was-invoked").exists())
+
     def test_step_failure(self):
         self.stub("rm", 'case "$*" in *".pyc") exit 1;; esac\nexec /bin/rm "$@"')
         result = self.cli("--projects-only", "--project", str(self.project), "--json")
