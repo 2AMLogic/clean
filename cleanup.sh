@@ -688,19 +688,21 @@ if command -v brew >/dev/null; then
     fi
 fi
 
-# npm global cache
-if command -v npm &> /dev/null; then
-    echo "📦 Cleaning npm cache..."
-    SIZE=$(get_size ~/.npm)
-    echo "  Current size: $SIZE"
-    if [ "$CHECK_MODE" = false ]; then
-        npm cache clean --force 2>/dev/null || echo "  ⚠️  npm cache cleanup skipped"
-    fi
-    echo ""
-fi
+# Compiler caches, npm cache, and idle scratch directories
+sweep_mode=clean
+[ "$CHECK_MODE" = false ] || sweep_mode=check
+sweep_args=(--mode "$sweep_mode")
+[ "$AGGRESSIVE_MODE" = false ] || sweep_args+=(--aggressive)
+python3 -B "$SCRIPT_DIR/scripts/system_sweep.py" "${sweep_args[@]}" || step_failed "system caches" "cache or scratch pass failed"
+echo ""
 
 if command -v pnpm >/dev/null; then
-    if cache=$(pnpm store path); then clean_cache "$cache" "pnpm store prune" pnpm store prune
+    if [ "$CHECK_MODE" = true ]; then
+        # Even 'pnpm store path' can create a new store. Prune itself knows
+        # which objects are reclaimable only when it runs.
+        echo "  Would run: pnpm store prune (reclaimable size unknown)"
+        record_item would_remove pnpm "pnpm store prune; reclaimable size unknown"
+    elif cache=$(pnpm store path); then clean_cache "$cache" "pnpm store prune" pnpm store prune
     else step_failed pnpm "locate store"; fi
 fi
 if command -v pip >/dev/null; then
