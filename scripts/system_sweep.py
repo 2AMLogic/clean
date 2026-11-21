@@ -18,7 +18,7 @@ def allocated(path):
     return int(subprocess.check_output(["du", "-sk", str(path)]).split()[0]) * 1024
 
 
-def tool_cache(path, command, preview):
+def tool_cache(path, command, preview, env=None):
     if not path.is_dir() or path.is_symlink():
         return
     before = allocated(path)
@@ -26,18 +26,36 @@ def tool_cache(path, command, preview):
     if preview:
         event("would_remove", path, " ".join(command), before)
     else:
-        subprocess.run(command, cwd="/", check=True)
+        subprocess.run(command, cwd="/", check=True, env=env)
         after = allocated(path)
         print(f"  {path}: {human(after)} after")
         event("removed", path, " ".join(command), max(0, before - after))
 
 
+def npm_cache_root():
+    # npm creates its effective cache even for 'npm config get cache'. Read
+    # the path settings directly so previewing an empty machine is read-only.
+    configured = os.environ.get("npm_config_cache") or os.environ.get("NPM_CONFIG_CACHE")
+    if configured:
+        return Path(configured).expanduser()
+    prefix = os.environ.get("npm_config_prefix") or os.environ.get("NPM_CONFIG_PREFIX")
+    prefix = Path(prefix) if prefix else Path(shutil.which("npm")).parent.parent
+    root = Path.home() / ".npm"
+    for name, default in (("globalconfig", prefix / "etc/npmrc"), ("userconfig", Path.home() / ".npmrc")):
+        key = "npm_config_" + name
+        config = Path(os.environ.get(key) or os.environ.get(key.upper()) or default)
+        if config.is_file():
+            for line in config.read_text().splitlines():
+                key, sep, value = line.partition("=")
+                if sep and key.strip().lower() == "cache":
+                    root = Path(os.path.expandvars(value.strip().strip('"').strip("'"))).expanduser()
+    return root
+
+
 def npm_caches(preview, processes, days):
     if not shutil.which("npm"):
         return
-    # Suppress npm's own log-file rotation during discovery in --check.
-    root = Path(os.fsdecode(subprocess.check_output(
-        ["npm", "config", "get", "cache", "--logs-max=0", "--update-notifier=false"], cwd="/")).strip())
+    root = npm_cache_root()
     if not root.is_absolute() or root.is_symlink():
         raise ValueError("npm reported an invalid cache root")
     tool_cache(root / "_cacache", ["npm", "cache", "clean", "--force", "--cache", str(root)], preview)
@@ -52,9 +70,17 @@ def npm_caches(preview, processes, days):
 def go_cache(preview):
     if not shutil.which("go"):
         return
-    root = Path(os.fsdecode(subprocess.check_output(["go", "env", "GOCACHE"], cwd="/")).strip())
+    # Even 'go env GOCACHE' writes telemetry in a pristine HOME. The macOS
+    # default and the go env -w user file are sufficient for a read-only probe.
+    configured = os.environ.get("GOCACHE")
+    config = Path(os.environ.get("GOENV") or Path.home() / "Library/Application Support/go/env")
+    if not configured and str(config) != "off" and config.is_file():
+        for line in config.read_text().splitlines():
+            if line.startswith("GOCACHE="):
+                configured = line[len("GOCACHE="):]
+    root = Path(configured or Path.home() / "Library/Caches/go-build")
     if root.is_absolute():
-        tool_cache(root, ["go", "clean", "-cache"], preview)
+        tool_cache(root, ["go", "clean", "-cache"], preview, dict(os.environ, GOCACHE=str(root)))
 
 
 def cache_objects(root, prefix=""):

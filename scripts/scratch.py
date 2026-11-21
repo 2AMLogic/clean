@@ -2,6 +2,7 @@
 
 import bisect
 from collections import defaultdict
+from functools import lru_cache
 import fnmatch
 import pwd
 import os
@@ -122,12 +123,26 @@ def inspect(path, cutoff, *, size_recent=False):
     return size, reason or ("recent activity" if recent else ""), repos
 
 
+@lru_cache(maxsize=1)
+def repo_environment_keys():
+    return os.fsdecode(subprocess.check_output(["git", "rev-parse", "--local-env-vars"], cwd="/")).splitlines()
+
+
 def has_work(repo):
-    # Include detached HEAD and other local refs such as stashes. Keep a clone
-    # with external worktrees: removing it would break their object store.
+    # Repo-local environment inherited from a git hook can silently redirect
+    # git -C to an unrelated index, worktree or object store.
+    env = os.environ.copy()
+    for key in repo_environment_keys():
+        env.pop(key, None)
+
     def git(*args):
         return subprocess.check_output(["git", "--no-optional-locks", "-C", str(repo), *args],
-                                       stderr=subprocess.DEVNULL)
+                                       stderr=subprocess.DEVNULL, env=env)
+    actual = Path(os.fsdecode(git("rev-parse", "--show-toplevel").rstrip(b"\n")))
+    if actual.resolve() != repo.resolve():
+        return True
+    # Include detached HEAD, stashes and local refs. External worktrees
+    # depend on the object store even when every commit is on a remote.
     return (git("status", "--porcelain", "--untracked-files=all")
             or git("rev-list", "-1", "HEAD", "--all", "--not", "--remotes")
             or git("worktree", "list", "--porcelain").count(b"worktree ") != 1)
@@ -267,14 +282,14 @@ def sweep(root, kind, days, preview, processes):
 
 
 def scratch_areas(preview, processes, tmp_days, session_days, scratch_days):
-    temp = os.environ.get("TMPDIR")
+    system_tmp = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True)
+    system = os.fsdecode(system_tmp.stdout).strip() if system_tmp.returncode == 0 else ""
+    temp = os.environ.get("TMPDIR") or system
     seen = set()
     if temp and os.path.isabs(temp):
         # Only the OS-designated per-user temporary directory is eligible for
         # broad sweeping. A custom TMPDIR gets the narrower configured-root rules.
-        system_tmp = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True)
         root = Path(temp).resolve()
-        system = os.fsdecode(system_tmp.stdout).strip()
         kind = "tmp" if system and root == Path(system).resolve() else "scratch"
         if root != Path("/tmp").resolve():
             sweep(root, kind, tmp_days, preview, processes)

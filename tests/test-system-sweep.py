@@ -106,6 +106,36 @@ class SweepTests(unittest.TestCase):
         self.sweep()
         self.assertFalse(stale.exists())
 
+    def test_git_environment_cannot_redirect_wip_inspection(self):
+        other = self.temp / "pushed"
+        dirty = self.folder("repo.aB3dE6")
+        for repo in (other, dirty):
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=test@example.com",
+                            "commit", "-qm", "baseline", "--allow-empty"], check=True)
+            subprocess.run(["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+        self.age(dirty)
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other),
+                                          "GIT_INDEX_FILE": str(other / ".git/index")}):
+            self.sweep()
+        self.assertTrue((dirty / "data").exists())
+
+    def test_launchd_temp_fallback(self):
+        process = subprocess.CompletedProcess([], 0, os.fsencode(self.root), b"")
+        with mock.patch.dict(os.environ, {"TMPDIR": "", "CLEAN_SCRATCH_ROOTS": ""}), \
+             mock.patch("scratch.subprocess.run", return_value=process), mock.patch("scratch.sweep") as sweep:
+            scratch.scratch_areas(True, self.processes, 7, 3, 7)
+            sweep.assert_any_call(self.root, "tmp", 7, True, self.processes)
+
+    def test_empty_cache_preview_never_invokes_npm_or_go(self):
+        with mock.patch.dict(os.environ, {"GOCACHE": "", "NPM_CONFIG_CACHE": "", "npm_config_cache": ""}), \
+             mock.patch("system_sweep.shutil.which", return_value="/usr/local/bin/installed"), \
+             mock.patch("system_sweep.subprocess.check_output", side_effect=AssertionError("unexpected command")), \
+             mock.patch("system_sweep.subprocess.run", side_effect=AssertionError("unexpected command")):
+            system_sweep.go_cache(True)
+            system_sweep.npm_caches(True, self.processes, 7)
+        self.assertFalse(Path.home().exists())
+
     def test_unknown_handles_or_recency_keep_candidate(self):
         path = self.folder("unknown.aB3dE6")
         self.processes.busy.side_effect = OSError("lsof unavailable")
@@ -162,7 +192,8 @@ class SweepTests(unittest.TestCase):
         npm.chmod(0o755)
         go.chmod(0o755)
         go_data = self.folder("go") / "data"
-        with mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:/bin:/usr/bin", "CACHE_FIXTURE": str(self.root)}):
+        with mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:/bin:/usr/bin", "CACHE_FIXTURE": str(self.root),
+                                        "npm_config_cache": str(self.root), "GOCACHE": str(go_data.parent)}):
             system_sweep.npm_caches(True, self.processes, 7)
             system_sweep.go_cache(True)
             self.assertTrue(go_data.exists())
