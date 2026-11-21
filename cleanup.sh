@@ -556,16 +556,13 @@ else
 fi
 echo ""
 
-# npm global cache
-if command -v npm &> /dev/null; then
-    echo "📦 Cleaning npm cache..."
-    SIZE=$(get_size ~/.npm)
-    echo "  Current size: $SIZE"
-    if [ "$CHECK_MODE" = false ]; then
-        npm cache clean --force 2>/dev/null || echo "  ⚠️  npm cache cleanup skipped"
-    fi
-    echo ""
-fi
+# Compiler caches, npm cache, and idle scratch directories
+sweep_mode=clean
+[ "$CHECK_MODE" = false ] || sweep_mode=check
+sweep_args=(--mode "$sweep_mode")
+[ "$AGGRESSIVE_MODE" = false ] || sweep_args+=(--aggressive)
+python3 -B "$SCRIPT_DIR/scripts/system_sweep.py" "${sweep_args[@]}" || step_failed "system caches" "cache or scratch pass failed"
+echo ""
 
 # pnpm global store
 if command -v pnpm &> /dev/null; then
