@@ -161,9 +161,45 @@ This tool is built for workflows that use git worktrees for issue-based developm
 - **macOS** (uses `stat -f`, `~/Library` paths, macOS `date` flags)
 - **gh CLI** (optional, for worktree/branch cleanup)
 
-## License
+## System diagnostics
 
-MIT
+The system phase reports swap and memory pressure, executables with more than
+50 processes, temporary executables running longer than six hours, and the
+five processes with the highest RSS. It reports the combined RSS and oldest
+process age for each large group. Process inspection uses executable names
+and paths, without printing process arguments.
+
+The summary lists allocated disk space, newest modification time, and counts
+of files older than 30 and 90 days in known tool homes, including Codex
+sessions and history databases, Claude projects, Loom vendored runtime state,
+Elan, Rustup and individual directories under `~/.local/state`. It offers
+toolchain review commands and flags vendored versions with no detected
+configuration or active executable reference. All these reports are read-only.
+
+For Docker Desktop, the summary reads `DataFolder` from `settings-store.json`,
+shows allocated image sizes and the free space on that volume even when the
+engine is down. It looks for other `Docker.raw` images in the default directory
+and Spotlight's index. For unindexed former locations, set
+`CLEAN_DOCKER_SEARCH_ROOTS` to a colon-separated list of directories to scan.
+Images outside the configured data directory include their modification date
+for manual review.
+
+## Scheduled cleanup on macOS
+
+```sh
+clean schedule install --interval-hours 24
+clean schedule status
+clean schedule uninstall
+```
+
+Installation loads a per-user LaunchAgent. The default interval is 24 hours.
+The agent runs ordinary cleanup with stdin closed and writes to
+`~/Library/Logs/clean.log`. Status includes the last completed run, exit code
+and free space. The log records free space before and after each run.
+Set `CLEAN_LOW_DISK_GIB` (default 30) before installation to change the warning
+threshold shared by the schedule and Docker report. Reinstall to update the
+interval or captured cleanup settings. Scheduling and system diagnostics
+require Python 3.
 
 ## Scratch directories and package caches
 
@@ -191,3 +227,7 @@ For sccache, it stops the cache server and reclaims recognized cache objects
 when they total at least 1 GiB, or at any size with `--aggressive`.
 `CLEAN_SCCACHE_MIN_MIB` sets the threshold in MiB. Preview mode reports sizes
 without stopping the server.
+
+## License
+
+MIT

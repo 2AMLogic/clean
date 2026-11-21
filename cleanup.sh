@@ -64,6 +64,11 @@ PROJECTS=()
 ACTIVE_WORKTREES=""
 PHASE=""
 # Parse arguments
+if [ "${1:-}" = schedule ]; then
+    shift
+    exec python3 -B "$SCRIPT_DIR/scripts/schedule.py" "$@"
+fi
+
 if [ "$1" = "--version" ] || [ "$1" = "-V" ]; then
     echo "clean $VERSION"
     exit 0
@@ -73,6 +78,7 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "clean $VERSION — aggressive but safe disk cleanup for macOS dev machines"
     echo ""
     echo "Usage: clean [options]"
+    echo "       clean schedule install [--interval-hours N] | status | uninstall"
     echo ""
     echo "Designed for developers working with lots of git worktrees."
     echo ""
@@ -744,7 +750,7 @@ if command -v docker &> /dev/null; then
     }
     if ! timeout 5 docker info &>/dev/null; then
         record_item skipped docker "engine unavailable"
-        echo "  ⚠️  Docker daemon not running, skipping Docker cleanup"
+        echo "  Docker engine unreachable. Check free space on its data volume below before restarting Docker."
         echo ""
     else
         if [ "$CHECK_MODE" = false ]; then
@@ -803,7 +809,7 @@ fi
 echo ""
 
 if [ -d "$HOME/Library/Logs" ]; then
-    if /usr/bin/find "$HOME/Library/Logs" -type f -mtime +30 -print0 > "$CLEAN_EVENT_FILE.candidates"; then
+    if /usr/bin/find "$HOME/Library/Logs" -type f ! -path "$HOME/Library/Logs/clean.log" -mtime +30 -print0 > "$CLEAN_EVENT_FILE.candidates"; then
       while IFS= read -r -d '' item; do
         remove_item "$item" "log older than 30 days"
       done < "$CLEAN_EVENT_FILE.candidates"
@@ -1208,6 +1214,15 @@ echo ""
 fi  # gh CLI check
 
 fi  # worktree phase
+
+if [ "$RUN_SYSTEM" = true ]; then
+    if command -v python3 >/dev/null; then
+        python3 -B "$SCRIPT_DIR/scripts/system_report.py" "${PROJECTS[@]}" || step_failed "system report" "diagnostics failed"
+    else
+        echo "  System diagnostics skipped: python3 unavailable"
+        record_item skipped "system report" "python3 unavailable"
+    fi
+fi
 
 # =============================================================================
 # SUMMARY
