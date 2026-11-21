@@ -3,6 +3,7 @@
 set -eu
 script="$(cd "$(dirname "$0")/.." && pwd)/cleanup.sh"
 fixture=$(mktemp -d)
+fixture=$(cd "$fixture" && pwd -P)
 trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/home" "$fixture/projects/example" "$fixture/bin"
 pyc="$fixture/projects/example/stale file.pyc"
@@ -13,7 +14,7 @@ cp -Rp "$fixture/projects" "$fixture/before"
 printf '#!/bin/sh\nexit 1\n' > "$fixture/bin/brew"
 chmod +x "$fixture/bin/brew"
 env HOME="$fixture/home" CLEAN_PROJECT_DIR="$fixture/projects" PATH="$fixture/bin:/usr/bin:/bin" \
-    /bin/bash "$script" --check --aggressive > "$fixture/result"
+    /bin/bash "$script" --projects-only --check --aggressive > "$fixture/result"
 diff -r "$fixture/before" "$fixture/projects"
 grep -F "[stray .pyc] $pyc" "$fixture/result"
 grep -E 'Potential space savings: [1-9][0-9]*[KMG]' "$fixture/result"
