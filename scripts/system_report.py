@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections import defaultdict
 
@@ -30,10 +31,10 @@ def disk_floor():
     return int(value) * GIB
 
 
-def query(argv, timeout=10):
+def query(argv, timeout=10, env=None):
     try:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                                timeout=timeout, check=True)
+                                timeout=timeout, check=True, env=env)
         return os.fsdecode(result.stdout).rstrip("\n")
     except (OSError, subprocess.SubprocessError):
         return None
@@ -155,6 +156,29 @@ def date_text(timestamp):
     return datetime.datetime.fromtimestamp(timestamp).astimezone().isoformat(timespec="seconds")
 
 
+def query_toolchains(manager, home, command):
+    """Query a disposable copy of manager metadata. Both CLIs write settings
+    on first use, even for inventory commands. Binaries are unnecessary."""
+    if not shutil.which(manager):
+        return None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = Path(tmp) / manager
+            inventory = mirror / "toolchains"
+            inventory.mkdir(parents=True)
+            for entry in (home / "toolchains").iterdir():
+                if entry.is_dir() and not entry.is_symlink():
+                    (inventory / entry.name).mkdir()
+            for name in ("settings.toml", "known-projects"):
+                if (home / name).is_file():
+                    shutil.copyfile(home / name, mirror / name)
+            env = dict(os.environ, HOME=tmp, CARGO_HOME=str(Path(tmp) / "cargo"))
+            env[manager.upper() + "_HOME"] = str(mirror)
+            return query([manager, *command], env=env)
+    except OSError:
+        return None
+
+
 def tool_homes(home, projects):
     now = time.time()
     elan = Path(os.environ.get("ELAN_HOME", home / ".elan"))
@@ -176,7 +200,7 @@ def tool_homes(home, projects):
         if path == elan or path == rust:
             if path == elan:
                 cmd = "elan toolchain gc"
-                result = query(["elan", "toolchain", "gc", "--json"])
+                result = query_toolchains("elan", elan, ["toolchain", "gc", "--json"])
                 try:
                     names = json.loads(result or "{}")["unused_toolchains"]
                     candidates = [elan / "toolchains" / name.replace("/", "--").replace(":", "---")
@@ -186,7 +210,7 @@ def tool_homes(home, projects):
                 label = "estimated reclaimable"
             else:
                 cmd = "rustup toolchain list -v"
-                result = query(["rustup", "toolchain", "list", "-v"])
+                result = query_toolchains("rustup", rust.parent, ["toolchain", "list", "-v"])
                 # Local overrides outside this workspace may still use these.
                 candidates = None if result is None else [
                     rust / line.split()[0] for line in result.splitlines()

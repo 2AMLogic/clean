@@ -60,6 +60,22 @@ class Reports(unittest.TestCase):
                 self.assertTrue(p.exists())
             self.assertIn("Data volume free", text)
 
+    def test_toolchain_inventory_cannot_write_user_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = Path(tmp) / ".elan"
+            (manager / "toolchains/a").mkdir(parents=True)
+
+            def fake_manager(cmd, env):
+                mirror = Path(env["ELAN_HOME"])
+                self.assertTrue((mirror / "toolchains/a").is_dir())
+                (mirror / "settings.toml").write_text("created on inventory")
+                return "{}"
+
+            with patch.object(report.shutil, "which", return_value="/fake/elan"), \
+                    patch.object(report, "query", side_effect=fake_manager):
+                self.assertEqual(report.query_toolchains("elan", manager, ["toolchain", "gc", "--json"]), "{}")
+            self.assertFalse((manager / "settings.toml").exists())
+
     def test_footprint_and_runtime_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -79,7 +95,7 @@ class Reports(unittest.TestCase):
             name.mkdir(parents=True)
             (name / "bin").write_bytes(b"a" * 4096)
             gc = json.dumps({"unused_toolchains": ["leanprover/lean4:v4.5.0"]})
-            with patch.object(report, "query", return_value=gc), patch.dict(
+            with patch.object(report, "query_toolchains", return_value=gc), patch.dict(
                     os.environ, {"ELAN_HOME": str(home / ".elan"), "RUSTUP_HOME": str(home / ".rustup")}):
                 text = output(report.tool_homes, home, [config.parents[1]])
             self.assertIn(f"1/1  {file.parent}", text)
