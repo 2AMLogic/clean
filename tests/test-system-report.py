@@ -127,7 +127,7 @@ esac
             runner.chmod(0o700)
             with patch.dict(os.environ, HOME=tmp, PATH=str(mockdir) + ":/usr/bin:/bin",
                             CLEAN_LOW_DISK_GIB="999999", CLEAN_SCRATCH_PATTERN="review-*.tmp",
-                            CLEAN_PROJECTS="relative"), patch.object(schedule, "SCRIPT", runner), \
+                            CLEAN_PROJECTS="relative", CARGO_BUILD_TARGET_DIR="cargo-cache"), patch.object(schedule, "SCRIPT", runner), \
                     patch.object(schedule.sys, "platform", "darwin"):
                 output(schedule.main, ["install", "--interval-hours", "6"])
                 plist = home / f"Library/LaunchAgents/{schedule.LABEL}.plist"
@@ -136,6 +136,7 @@ esac
                 self.assertEqual(agent["StartInterval"], 21600)
                 self.assertEqual(agent["EnvironmentVariables"]["CLEAN_SCRATCH_PATTERN"], "review-*.tmp")
                 self.assertEqual(agent["EnvironmentVariables"]["CLEAN_PROJECTS"], os.path.abspath("relative"))
+                self.assertEqual(agent["EnvironmentVariables"]["CARGO_BUILD_TARGET_DIR"], os.path.abspath("cargo-cache"))
                 self.assertEqual(agent["StandardErrorPath"], str(home / "Library/Logs/clean.log"))
                 self.assertIn("already loaded", output(schedule.main, ["install", "--interval-hours", "6"]))
                 self.assertIn("none recorded", output(schedule.main, ["status"]))
