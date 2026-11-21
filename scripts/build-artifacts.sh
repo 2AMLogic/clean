@@ -23,6 +23,9 @@ verify_build() {
     elif { [ "$kind" = shared ] || [ "$kind" = cargo ]; } && cargo_may_be_running; then
         keep_item "$path" "cargo or rustc active, or process list unavailable"
         return 1
+    elif [ "$(cd "$path" && pwd -P)" != "$path" ] || [ "$(/usr/bin/stat -f '%d:%i' "$path")" != "$expected" ]; then
+        keep_item "$path" "build path changed during inspection"
+        return 1
     fi
     return 0
 }

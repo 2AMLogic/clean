@@ -217,7 +217,7 @@ finish() {
     local result=$?
     trap - EXIT
     python3 -B "$SCRIPT_DIR/scripts/summary.py" "$CLEAN_EVENT_FILE" "$JSON_MODE" "$CHECK_MODE" "$result" >&3 || result=$?
-    rm -f "$CLEAN_EVENT_FILE" "$CLEAN_EVENT_FILE.candidates"
+    rm -f "$CLEAN_EVENT_FILE" "$CLEAN_EVENT_FILE.candidates" "$run_dir/activity.json" "$run_dir/activity.json.dirs"
     rm -rf -- "$run_dir/npm"
     rmdir "$run_dir"
     exit "$result"
@@ -620,7 +620,7 @@ runtime_project_reason() {
 # Remove or report removal of a file/directory
 remove_item() {
     local item="$1"
-    local reason="$2"
+    local reason="$2" parent before="" after
 
     [ -e "$item" ] || return 0
     local kib
@@ -632,9 +632,16 @@ remove_item() {
         "$@" || return 0
     fi
     echo "  [$reason] $item ($(bytes_to_human "$kib"))"
+    if [ -n "${CLEAN_ACTIVITY_SNAPSHOT:-}" ] && [ ! -e "$project/.git" ]; then
+        parent=${item%/*}
+        before=$(/usr/bin/stat -f '%d %i %.9Fm' "$parent") || before=""
+    fi
     if [ "$CHECK_MODE" = true ]; then
         record_item would_remove "$item" "$reason" "$((kib * 1024))"
     elif rm -rf -- "$item"; then
+        if [ -n "$before" ] && after=$(/usr/bin/stat -f '%d %i %.9Fm' "$parent") && [ "${before% *}" = "${after% *}" ]; then
+            printf '%s %s\n' "$before" "${after##* }" >> "$CLEAN_ACTIVITY_SNAPSHOT.dirs"
+        fi
         record_item removed "$item" "$reason" "$((kib * 1024))"
         echo "    ✓ Removed"
     else
@@ -646,6 +653,7 @@ remove_item() {
 # SYSTEM CLEANUP
 # =============================================================================
 
+unset CLEAN_ACTIVITY_SNAPSHOT
 discover_active_worktrees
 if [ "$RUN_SYSTEM" = true ]; then
 echo "═══════════════════════════════════════════════════════════"
@@ -883,6 +891,13 @@ fi  # system phase
 
 if [ "$RUN_PROJECTS" = true ]; then
 
+if [ "$CHECK_MODE" = false ]; then
+    CLEAN_ACTIVITY_SNAPSHOT="$run_dir/activity.json"
+    export CLEAN_ACTIVITY_SNAPSHOT
+    python3 -B "$SCRIPT_DIR/scripts/build-artifacts.py" snapshot "${PROJECTS[@]}" > "$CLEAN_ACTIVITY_SNAPSHOT"
+    : > "$CLEAN_ACTIVITY_SNAPSHOT.dirs"
+fi
+
 echo "═══════════════════════════════════════════════════════════"
 echo "              PROJECT CLEANUP (${#PROJECTS[@]} workspaces)"
 echo "═══════════════════════════════════════════════════════════"
@@ -1010,6 +1025,7 @@ echo ""
 # under .loom/worktrees/ and .claude/worktrees/.
 # =============================================================================
 
+unset CLEAN_ACTIVITY_SNAPSHOT
 fi  # project phase
 
 if [ "$RUN_WORKTREES" = true ]; then

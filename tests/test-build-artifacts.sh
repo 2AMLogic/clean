@@ -205,4 +205,48 @@ mkdir -p "$project/.venv" "$project/target"
 find "$project/.venv" "$project/target" -exec touch -t 200101010000 {} +
 run_project
 [ -d "$project/.venv" ] && [ -d "$project/target" ]
+# Unlinking an earlier item changes its parent directory's mtime. That
+# bookkeeping must not make an idle non-git project active halfway through.
+project="$fixture/nongit"
+make_nongit() {
+    mkdir -p "$project/proofs/.lake/build" "$project/node_modules" "$project/.venv"
+    echo compiled > "$project/proofs/.lake/build/proof.olean"
+    echo bytecode > "$project/old.pyc"
+    find "$project" -exec touch -t 200101010000 {} +
+}
+make_nongit
+run_project --check
+cp "$fixture/run.json" "$fixture/preview.json"
+run_project
+python3 - "$fixture/preview.json" "$fixture/run.json" "$project" <<'PYTEST'
+import json, sys
+from pathlib import Path
+def paths(report, status):
+    return {Path(i["path"]) for i in json.load(open(report))["items"] if i["status"] == status}
+expected = {Path(sys.argv[3], p) for p in ("old.pyc", "node_modules", ".venv", "proofs/.lake/build")}
+assert paths(sys.argv[1], "would_remove") == paths(sys.argv[2], "removed") == expected
+PYTEST
+make_nongit
+# Simulate a user writing source while another item is being removed.
+cat > "$fixture/bin/rm" <<'RMSTUB'
+#!/bin/bash
+case ${!#} in */old.pyc) touch "${!#}.new-source" ;; esac
+exec /bin/rm "$@"
+RMSTUB
+chmod +x "$fixture/bin/rm"
+run_project
+[ -f "$project/proofs/.lake/build/proof.olean" ]
+grep -q 'new-source' "$fixture/run.json"
+# Different thresholds can remove the only originally recent file before the
+# Lake pass. Keep its original evidence during the apply run.
+unlink "$fixture/bin/rm"
+project="$fixture/mixed-thresholds"
+make_nongit
+touch -t "$(date -v-4d +%Y%m%d%H%M)" "$project/old.pyc"
+export CLEAN_PYCACHE_AGE_DAYS=2
+run_project --check
+run_project
+[ ! -e "$project/old.pyc" ]
+[ -f "$project/proofs/.lake/build/proof.olean" ]
+grep -q 'old.pyc' "$fixture/run.json"
 echo 'Project activity, Lake builds, and shared Cargo target fixtures passed.'

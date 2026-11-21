@@ -1,5 +1,6 @@
 """Read-only discovery for project activity, Lake builds, and shared Cargo targets."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -35,6 +36,42 @@ def identity(path):
     return f"{st.st_dev}:{st.st_ino}"
 
 
+def nongit_paths(project):
+    # Outside git even a recently modified empty directory counts as activity.
+    for root, dirs, files in os.walk(project, onerror=raise_error):
+        dirs[:] = [d for d in dirs if d not in BUILD_DIRS]
+        yield Path(root)
+        yield from (Path(root, name) for name in files)
+
+
+def snapshot(projects):
+    # Keep original evidence even if another pass reclaims its last file.
+    result = {}
+    for project in projects:
+        if owning_checkout(project) is not None:
+            continue
+        try:
+            result[str(project)] = max((p.lstat().st_mtime, str(p.relative_to(project)))
+                                       for p in nongit_paths(project))
+        except OSError:
+            result[str(project)] = [None, "could not verify initial project activity"]
+    return result
+
+
+def directory_times(journal):
+    # Preserve the original mtime only across our own consecutive unlinks.
+    # A later user edit or a replacement inode breaks the chain.
+    changed = {}
+    with open(journal, encoding="ascii") as stream:
+        for line in stream:
+            dev, ino, before, after = line.split()
+            key = int(dev), int(ino)
+            previous = changed.get(key)
+            original = previous[1] if previous and previous[0] == before else before
+            changed[key] = after, original
+    return changed
+
+
 def activity(project, days):
     days = int(days)
     if days < 1:
@@ -42,12 +79,27 @@ def activity(project, days):
     cutoff = time.time() - days * 86400
     checkout = owning_checkout(project)
     if checkout is None:
-        # Outside git even a recent empty directory can represent ongoing work.
-        for root, dirs, files in os.walk(project, onerror=raise_error):
-            dirs[:] = [d for d in dirs if d not in BUILD_DIRS]
-            for path in [Path(root)] + [Path(root, f) for f in files]:
-                if path.lstat().st_mtime >= cutoff:
-                    return "path " + str(path.relative_to(project))
+        changed = {}
+        baseline = os.environ.get("CLEAN_ACTIVITY_SNAPSHOT")
+        if baseline:
+            with open(baseline, encoding="utf-8") as stream:
+                initial = json.load(stream).get(str(project))
+            if initial:
+                if initial[0] is None:
+                    return initial[1]
+                if initial[0] >= cutoff:
+                    return "path " + initial[1]
+            changed = directory_times(baseline + ".dirs")
+        for path in nongit_paths(project):
+            st = path.lstat()
+            mtime = st.st_mtime
+            recorded = changed.get((st.st_dev, st.st_ino))
+            if recorded:
+                seconds, nanos = divmod(st.st_mtime_ns, 10**9)
+                if recorded[0] == f"{seconds}.{nanos:09d}":
+                    mtime = float(recorded[1])
+            if mtime >= cutoff:
+                return "path " + str(path.relative_to(project))
         return ""
 
     project = checkout
@@ -198,7 +250,9 @@ def build_keep_reason(path, expected, kind, days=None):
 if __name__ == "__main__":
     mode = sys.argv[1]
     try:
-        if mode == "activity":
+        if mode == "snapshot":
+            print(json.dumps(snapshot(map(Path, sys.argv[2:]))))
+        elif mode == "activity":
             print(activity(Path(sys.argv[2]), sys.argv[3]))
         elif mode == "lake":
             lake_builds(Path(sys.argv[2]), sys.argv[3] == "true")
