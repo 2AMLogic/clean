@@ -12,10 +12,11 @@ export GIT_AUTHOR_NAME=test GIT_COMMITTER_NAME=test
 export GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_EMAIL=test@example.invalid
 git init -q "$project"
 echo 'int x;' > "$project/source.c"
-git -C "$project" add source.c
+printf '.lake/\n.venv/\ntarget/\n' > "$project/.gitignore"
+git -C "$project" add source.c .gitignore
 GIT_AUTHOR_DATE=2001-01-01T00:00:00Z GIT_COMMITTER_DATE=2001-01-01T00:00:00Z git -C "$project" commit -qm 'old commit'
 mkdir -p "$project/.loom-local" "$project/.loom/locks" "$project/node_modules"
-touch -t 200101010000 "$project/source.c"
+touch -t 200101010000 "$project/source.c" "$project/.gitignore"
 touch "$project/.git/FETCH_HEAD" "$project/.loom-local/fleet-repo.bak" "$project/.loom/locks/state" "$project/node_modules/pkg"
 if has_recent_project_activity "$project" 7; then echo "unexpected activity: $PROJECT_ACTIVITY_REASON"; exit 1; fi
 touch "$project/authored file"
@@ -43,7 +44,7 @@ record_item() { :; }
 keep_item() { echo "  [KEEP $2] $1"; }
 step_failed() { echo "unexpected error: $*" >&2; exit 1; }
 get_size() { du -sh "$1" | cut -f1; }
-get_size_bytes() { du -sk "$1" | cut -f1; }
+get_size_kib() { du -sk "$1" | cut -f1; }
 bytes_to_human() { echo "${1}K"; }
 eval "$(sed -n '/^remove_item() {/,/^}/p' "$SCRIPT_DIR/cleanup.sh")"
 
@@ -65,6 +66,34 @@ clean_project_lake_builds
 [ ! -e "$project/proofs/.lake/build" ]
 [ -d "$project/proofs/.lake/packages" ]
 [ -d "$project/.loom/worktrees/wt/proofs/.lake/build" ]
+
+# A Lake output directory can also hold authored files, checkout metadata or a
+# user-owned clone. A clean, old project and a clear process snapshot cannot
+# authorize removing those.
+protected="$project/proofs/.lake/build"
+mkdir -p "$protected"
+echo tracked > "$protected/keep.lean"
+git -C "$project" add -f "$protected/keep.lean"
+GIT_AUTHOR_DATE=2001-01-02T00:00:00Z GIT_COMMITTER_DATE=2001-01-02T00:00:00Z git -C "$project" commit -qm 'tracked build contents'
+clean_project_lake_builds
+[ -f "$protected/keep.lean" ]
+git -C "$project" rm --quiet --cached "$protected/keep.lean"
+mkdir -p "$protected/nested"
+echo 'gitdir: absent-worktree-metadata' > "$protected/nested/.git"
+clean_project_lake_builds
+[ -e "$protected/nested/.git" ]
+unlink "$protected/nested/.git"
+git init -q "$protected/nested"
+echo 'in progress' > "$protected/nested/only-copy"
+clean_project_lake_builds
+[ -f "$protected/nested/only-copy" ]
+mv "$protected/nested" "$fixture/kept-clone"
+test_id=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1]);print(f"{s.st_dev}:{s.st_ino}")' "$protected")
+mv "$project/proofs/.lake" "$fixture/actual-lake"
+ln -s "$fixture/actual-lake" "$project/proofs/.lake"
+if verify_build "$protected" "$test_id" "$project" lake; then echo 'followed a replaced parent symlink'; exit 1; fi
+unlink "$project/proofs/.lake"
+mv "$fixture/actual-lake" "$project/proofs/.lake"
 
 export CARGO_HOME="$fixture/.cargo"
 unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR
@@ -106,4 +135,38 @@ clean_shared_target
 [ -d "$shared/private/.git" ]
 [ -d "$shared/unknown" ]
 [[ "$SHARED_CARGO_SUMMARY" =~ [1-9][0-9]*' bytes freed' ]]
+# Exercise the installed script entry point and its scheduler-facing events.
+# The project phase scopes every mutation to this fixture. Mock lsof so an
+# unrelated process inspecting the test tree cannot make the run nondeterministic.
+mkdir -p "$fixture/bin" "$fixture/home" "$project/proofs/.lake/build"
+ln -s "$SCRIPT_DIR/cleanup.sh" "$fixture/bin/clean"
+printf '#!/bin/sh\nexit 1\n' > "$fixture/bin/lsof"
+chmod +x "$fixture/bin/lsof"
+printf 'compiled module' > "$project/proofs/.lake/build/example.olean"
+run_project() {
+    env HOME="$fixture/home" PATH="$fixture/bin:/usr/bin:/bin" \
+        "$fixture/bin/clean" --project "$project" --projects-only --json "$@" \
+        > "$fixture/run.json" 2> "$fixture/run.log" || { cat "$fixture/run.log" >&2; return 1; }
+}
+run_project --check
+python3 - "$fixture/run.json" "$project/proofs/.lake/build" <<'PYTEST'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert any(i["status"] == "would_remove" and i["path"] == sys.argv[2] and i["bytes"] > 0
+           for i in result["items"]), result
+PYTEST
+[ -f "$project/proofs/.lake/build/example.olean" ]
+touch "$project/source.c"
+run_project
+python3 - "$fixture/run.json" "$project/proofs/.lake/build" <<'PYTEST'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert any(i["status"] == "kept" and i["path"] == sys.argv[2] and "source.c" in i["reason"]
+           for i in result["items"]), result
+PYTEST
+[ -f "$project/proofs/.lake/build/example.olean" ]
+touch -t 200101010000 "$project/source.c"
+run_project
+[ ! -d "$project/proofs/.lake/build" ]
+[ -d "$project/proofs/.lake/packages" ]
 echo 'Project activity, Lake builds, and shared Cargo target fixtures passed.'

@@ -144,8 +144,8 @@ MIT
 ### Project activity, Lean, and shared Cargo builds
 
 For git checkouts, the project idle window includes the latest commit and
-recently edited tracked or non-ignored files. Background fetches, Loom runtime
-state, and generated build trees do not reset it. A preview prints the path
+recently edited tracked or non-ignored files. The age check skips background
+fetches, Loom runtime metadata, and generated build trees. A preview prints the path
 or commit that kept a project active. Other directories retain a recursive
 mtime check.
 
@@ -161,4 +161,5 @@ prunes each idle profile independently, including named profiles, target
 triples, and task-specific target trees. The age threshold is
 `CLEAN_TARGET_AGE_DAYS`. An active Cargo or rustc process, recent activity
 anywhere in the profile, a nested checkout, or open handles keep the profile.
-Config-file discovery uses Python 3.11+ or the `tomli` module on older Python.
+Config-file discovery uses Python’s TOML reader or `tomli`, including the copy
+shipped with the macOS developer tools’ Python 3.9.

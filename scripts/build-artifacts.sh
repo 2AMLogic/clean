@@ -8,22 +8,38 @@ has_recent_project_activity() {
     [ -n "$PROJECT_ACTIVITY_REASON" ]
 }
 
+verify_build() {
+    local path="$1" expected="$2" handle_root="$3" kind="$4" evidence
+    shift 4
+    if ! evidence=$(python3 -B "$SCRIPT_DIR/scripts/build-artifacts.py" verify "$path" "$expected" "$kind" "$@"); then
+        keep_item "$path" "could not verify build contents"
+        return 1
+    elif [ -n "$evidence" ]; then
+        keep_item "$path" "$evidence"
+        return 1
+    elif has_open_handles "$handle_root"; then
+        keep_item "$path" "open handles or incomplete lsof check"
+        return 1
+    elif { [ "$kind" = shared ] || [ "$kind" = cargo ]; } && cargo_may_be_running; then
+        keep_item "$path" "cargo or rustc active, or process list unavailable"
+        return 1
+    fi
+    return 0
+}
+
 clean_lake_builds() {
-    local project="$1" builds="$2" build owner why
+    local project="$1" builds="$2" build expected owner why
     if ! python3 -B "$SCRIPT_DIR/scripts/build-artifacts.py" lake "$project" "$EXPLICIT_PROJECTS" > "$builds"; then
         step_failed "$project" "could not enumerate Lake builds"
         return
     fi
-    while IFS= read -r -d '' build; do
-        owner=$(git -C "${build%/.lake/build}" rev-parse --show-toplevel 2>/dev/null) || owner="$project"
+    while IFS= read -r -d '' build && IFS= read -r -d '' expected && IFS= read -r -d '' owner; do
         if why=$(runtime_project_reason "$build"); then
             keep_item "$build" "$why"
         elif has_recent_project_activity "$owner" "$LAKE_AGE_DAYS"; then
             keep_item "$build" "recent project activity: $PROJECT_ACTIVITY_REASON"
-        elif has_open_handles "$owner"; then
-            keep_item "$build" "open handles"
         else
-            remove_item "$build" "Lake build"
+            remove_item "$build" "Lake build" verify_build "$build" "$expected" "$owner" lake
         fi
     done < "$builds"
 }
@@ -47,7 +63,7 @@ cargo_may_be_running() {
 }
 
 clean_shared_target() {
-    local target candidates profile evidence before after size_delta
+    local target candidates profile expected before after size_delta
     local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
     [ -n "${CARGO_TARGET_DIR:-}${CARGO_BUILD_TARGET_DIR:-}" ] || [ -f "$cargo_home/config" ] || [ -f "$cargo_home/config.toml" ] || return 0
     if ! target=$(python3 -B "$SCRIPT_DIR/scripts/build-artifacts.py" target); then
@@ -56,13 +72,13 @@ clean_shared_target() {
     fi
     [ -n "$target" ] && [ -d "$target" ] || return 0
     target=$(cd "$target" && pwd -P) || return 0
-    before=$(get_size_bytes "$target")
-    SHARED_CARGO_SUMMARY="Shared Cargo target: $target ($(bytes_to_human "${before:-0}"))"
-    echo "$SHARED_CARGO_SUMMARY"
     case "$(cd "$HOME" && pwd -P)/" in
         "$target"/|"$target"/*) keep_item "$target" "target contains the home directory"; return ;;
     esac
     if [ "$target" = / ]; then keep_item "$target" "target is the filesystem root"; return; fi
+    before=$(get_size_kib "$target") || { step_failed "$target" "measure shared Cargo target"; return; }
+    SHARED_CARGO_SUMMARY="Shared Cargo target: $target ($(bytes_to_human "${before:-0}"))"
+    echo "$SHARED_CARGO_SUMMARY"
     if is_in_active_worktree "$target"; then
         keep_item "$target" "inside a registered worktree"
         return
@@ -79,23 +95,11 @@ clean_shared_target() {
     if [ ! -s "$candidates" ]; then
         keep_item "$target" "no recognized Cargo profiles"
     fi
-    while IFS= read -r -d '' profile; do
-        # Recheck each profile just before removal. Preserve source checkouts
-        # accidentally placed inside a cache, and mounted filesystems.
-        if ! evidence=$(python3 -B "$SCRIPT_DIR/scripts/build-artifacts.py" profile-activity "$profile" "$TARGET_AGE_DAYS"); then
-            keep_item "$profile" "could not verify profile contents"
-        elif [ -n "$evidence" ]; then
-            keep_item "$profile" "$evidence"
-        elif has_open_handles "$profile"; then
-            keep_item "$profile" "open handles"
-        elif cargo_may_be_running; then
-            keep_item "$profile" "cargo or rustc active, or process list unavailable"
-        else
-            remove_item "$profile" "stale shared Cargo profile"
-        fi
+    while IFS= read -r -d '' profile && IFS= read -r -d '' expected; do
+        remove_item "$profile" "stale shared Cargo profile" verify_build "$profile" "$expected" "$profile" shared "$TARGET_AGE_DAYS"
     done < "$candidates"
     if [ "$CHECK_MODE" = false ]; then
-        after=$(get_size_bytes "$target")
+        after=$(get_size_kib "$target") || { step_failed "$target" "measure cleaned Cargo target"; return; }
         size_delta=$((before - after))
         [ "$size_delta" -ge 0 ] || size_delta=0
         SHARED_CARGO_SUMMARY="Shared Cargo target: $target ($(bytes_to_human "${after:-0}"), $((size_delta * 1024)) bytes freed)"
