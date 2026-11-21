@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-21
+
+### Added
+
+- Cleanup starts by showing the installed version and run mode. Interactive terminals use color for progress and outcomes. Set `NO_COLOR=1` for plain text.
+
+### Changed
+
+- Project cleanup reuses file metadata collected during discovery and rechecks older artifacts before removal. On a 24-workspace benchmark, removing 72 stale files took 5.42 seconds, down from 10.87 seconds.
+- Gradle cleanup skips recursive open-file checks when a workspace has no Gradle build or cache to clean. Homebrew, pip, and uv previews skip measuring caches whose sizes do not contribute to the estimate.
+- Scratch cleanup and disk usage reports scan large directory trees faster. On an 11,520-file benchmark, the scratch scan took 42 ms and the disk usage scan took 41 ms, down from 97 ms and 92 ms respectively.
+
 ## [0.4.0] - 2026-11-21
 
 ### Added
