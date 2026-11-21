@@ -140,32 +140,7 @@ directory). Each run lists the runtime projects it found and why, under
 Tests: `/bin/bash tests/test-runtime-projects.sh` (hermetic: throwaway `HOME` and
 project dir).
 
-## Worktree workflow
-
-This tool is built for workflows that use git worktrees for issue-based development (e.g., [Loom](https://github.com/rjwalters/loom)). The worktree cleanup section:
-
-- Scans each repo's `.loom/worktrees/` and `.claude/worktrees/` directories
-- For `issue-N` worktrees: checks the GitHub issue via `gh issue view` and only
-  removes worktrees where the issue is **CLOSED**
-- For everything else (agent scratch worktrees): only removes after
-  `WORKTREE_AGE_DAYS` of no activity anywhere in the tree
-- Always keeps worktrees with uncommitted changes or commits not on any remote
-  (even when the branch has no upstream), or with a live process inside
-- Directories that aren't git trees at all are reported and never deleted
-  (they may be residue of a lost worktree registration)
-- Cleans up orphaned `feature/issue-*` branches for closed issues
-
-## Requirements
-
-- **Python 3.9+** for workspace discovery and summaries
-- **macOS** (uses `stat -f`, `~/Library` paths, macOS `date` flags)
-- **gh CLI** (optional, for worktree/branch cleanup)
-
-## License
-
-MIT
-
-### Project activity, Lean, and shared Cargo builds
+## Project activity, Lean, and shared Cargo builds
 
 For git checkouts, the project idle window includes the latest commit and
 recently edited tracked or non-ignored files. The age check skips background
@@ -192,3 +167,68 @@ tracked or non-ignored work, nested repositories and mounted filesystems.
 
 Config-file discovery uses Python’s TOML reader or `tomli`, including the copy
 shipped with the macOS developer tools’ Python 3.9.
+
+## Worktree workflow
+
+This tool is built for workflows that use git worktrees for issue-based development (e.g., [Loom](https://github.com/rjwalters/loom)). The worktree cleanup section:
+
+- Scans each repo's `.loom/worktrees/` and `.claude/worktrees/` directories
+- For `issue-N` worktrees: checks the GitHub issue via `gh issue view` and only
+  removes worktrees where the issue is **CLOSED**
+- For everything else (agent scratch worktrees): only removes after
+  `WORKTREE_AGE_DAYS` of no activity anywhere in the tree
+- Always keeps worktrees with uncommitted changes or commits not on any remote
+  (even when the branch has no upstream), or with a live process inside
+- Directories that aren't git trees at all are reported and never deleted
+  (they may be residue of a lost worktree registration)
+- Cleans up orphaned `feature/issue-*` branches for closed issues
+
+## System diagnostics
+
+The system phase reports swap and memory pressure, executables with more than
+50 processes, temporary executables running longer than six hours, and the
+five processes with the highest RSS. It reports the combined RSS and oldest
+process age for each large group. Process inspection uses executable names
+and paths, without printing process arguments.
+
+The summary lists allocated disk space, newest modification time, and counts
+of files older than 30 and 90 days in known tool homes, including Codex
+sessions and history databases, Claude projects, Loom vendored runtime state,
+Elan, Rustup and individual directories under `~/.local/state`. It offers
+toolchain review commands and flags vendored versions with no detected
+configuration or active executable reference. All these reports are read-only.
+
+For Docker Desktop, the summary reads `DataFolder` from `settings-store.json`,
+shows allocated image sizes and the free space on that volume even when the
+engine is down. It looks for other `Docker.raw` images in the default directory
+and Spotlight's index. For unindexed former locations, set
+`CLEAN_DOCKER_SEARCH_ROOTS` to a colon-separated list of directories to scan.
+Images outside the configured data directory include their modification date
+for manual review.
+
+## Scheduled cleanup on macOS
+
+```sh
+clean schedule install --interval-hours 24
+clean schedule status
+clean schedule uninstall
+```
+
+Installation loads a per-user LaunchAgent. The default interval is 24 hours.
+The agent runs ordinary cleanup with stdin closed and writes to
+`~/Library/Logs/clean.log`. Status includes the last completed run, exit code
+and free space. The log records free space before and after each run.
+Set `CLEAN_LOW_DISK_GIB` (default 30) before installation to change the warning
+threshold shared by the schedule and Docker report. Reinstall to update the
+interval or captured cleanup settings. Scheduling and system diagnostics
+require Python 3.
+
+## Requirements
+
+- **Python 3.9+** for workspace discovery and summaries
+- **macOS** (uses `stat -f`, `~/Library` paths, macOS `date` flags)
+- **gh CLI** (optional, for worktree/branch cleanup)
+
+## License
+
+MIT
