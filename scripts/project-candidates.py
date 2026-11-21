@@ -11,7 +11,8 @@ PRUNE = {".git", ".loom", ".claude", ".loom-local", ".lake", "target", "node_mod
 def emit(kind, path):
     st = os.lstat(path)
     identity = f"{st.st_dev}:{st.st_ino}".encode()
-    sys.stdout.buffer.write(b"\0".join((kind.encode(), os.fsencode(path), identity)) + b"\0")
+    modified = str(st.st_mtime_ns // 1_000_000_000).encode()
+    sys.stdout.buffer.write(b"\0".join((kind.encode(), os.fsencode(path), identity, modified)) + b"\0")
 
 
 def walk(project):
@@ -24,7 +25,7 @@ def walk(project):
             continue
         for name in dirs[:]:
             path = os.path.join(root, name)
-            if os.path.islink(path) or name in PRUNE:
+            if name in PRUNE or os.path.islink(path):
                 dirs.remove(name)
             elif name in CACHES:
                 emit("cache", path)
@@ -33,6 +34,8 @@ def walk(project):
                 emit("venv", path)
                 dirs.remove(name)
         for name in files:
+            if not (name.endswith(".pyc") or name == "Cargo.toml"):
+                continue
             path = os.path.join(root, name)
             if os.path.islink(path):
                 continue

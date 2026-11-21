@@ -1,6 +1,7 @@
 """Public CLI, isolated homes and projects, with no live system cleanup."""
 import json
 import os
+import pty
 from pathlib import Path
 import subprocess
 import tempfile
@@ -76,7 +77,34 @@ class Fleet(unittest.TestCase):
         self.assertIn("requires macOS", refused.stderr)
         self.assertTrue((self.project / "old file.pyc").exists())
 
-    def test_pnpm_preview_never_initializes_store(self):
+    def test_artifact_refreshed_after_discovery(self):
+        item = self.project / "old file.pyc"
+        self.stub("python3", 'case "$2" in */project-candidates.py)\n'
+                  '    /usr/bin/python3 "$@" || exit 1\n'
+                  '    exec touch "$REFRESH_ITEM";;\nesac\nexec /usr/bin/python3 "$@"')
+        result = self.cli("--projects-only", "--project", self.project, "--json", REFRESH_ITEM=str(item))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(item.exists())
+        event, = json.loads(result.stdout)["items"]
+        self.assertEqual((event["status"], event["reason"]), ("kept", "recent stray .pyc"))
+
+    def test_open_handles_checked_only_for_gradle_candidates(self):
+        for project in (self.project, self.other):
+            (project / "build").mkdir()
+        (self.other / "build.gradle.kts").touch()
+        self.stub("lsof", 'for arg do last=$arg; done\necho "$last" >> "$HOME/lsof-calls"\nexit 0')
+        result = self.cli("--projects-only", "--check", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "lsof-calls").read_text().splitlines(), [str(self.other)])
+        items = json.loads(result.stdout)["items"]
+        self.assertTrue(any(event["path"] == str(self.other) and event["reason"] == "open handles"
+                            for event in items))
+
+    def test_native_cache_previews(self):
+        cache = self.root / "brew-cache"
+        cache.mkdir()
+        self.stub("brew", '[ "$1" = --cache ] || exit 1\necho "$HOME/brew-cache"')
+        self.stub("du", 'for arg do [ "$arg" != "$HOME/brew-cache" ] || exit 1; done\nexec /usr/bin/du "$@"')
         self.stub("pnpm", 'touch "$HOME/pnpm-was-invoked"')
         # The scratch scanner has its own fixture suite. Keep this system
         # preview from traversing the host's /private/tmp clones or sessions.
@@ -86,9 +114,36 @@ class Fleet(unittest.TestCase):
         preview = self.cli("--system-only", "--check", "--json")
         self.assertEqual(preview.returncode, 0, preview.stderr)
         items = json.loads(preview.stdout)["items"]
+        self.assertTrue(any(item["status"] == "would_remove" and item["path"] == str(cache)
+                            for item in items))
         self.assertTrue(any(item["status"] == "would_remove" and "pnpm store prune" in item["reason"]
                             for item in items))
         self.assertFalse((self.root / "pnpm-was-invoked").exists())
+
+    def test_terminal_banner_and_color(self):
+        self.stub("gh", "exit 1")
+        version = self.cli("--version").stdout.strip()
+        command = [self.link, "--worktrees-only", "--project", self.project]
+        plain = self.cli(*command[1:], TERM="xterm-256color")
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertEqual(plain.stdout.splitlines()[0], f"{version}  ·  Disk cleanup")
+        self.assertNotIn("\x1b", plain.stdout)
+
+        for env, color in [({"TERM": "xterm-256color"}, True),
+                           ({"TERM": "xterm-256color", "NO_COLOR": "1"}, False),
+                           ({"TERM": "dumb"}, False)]:
+            with self.subTest(env=env):
+                master, slave = pty.openpty()
+                with os.fdopen(master, "rb") as screen, os.fdopen(slave, "wb") as tty:
+                    # JSON goes to stdout. Send progress to a real terminal.
+                    result = subprocess.run([*command, "--json", "--check", "--aggressive"],
+                                            env=dict(self.env, **env), stdout=subprocess.PIPE,
+                                            stderr=tty, check=True)
+                    self.assertTrue(json.loads(result.stdout)["check"])
+                    line = screen.readline().decode().strip()
+                    self.assertIn(version, line)
+                    self.assertIn("Dry run (aggressive)", line)
+                    self.assertEqual("\x1b[" in line, color)
 
     def test_step_failure(self):
         self.stub("rm", 'case "$*" in *".pyc") exit 1;; esac\nexec /bin/rm "$@"')

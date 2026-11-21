@@ -81,6 +81,8 @@ clean --system-only # Skip per-project cleanup
 clean --help       # Show detailed help
 ```
 
+Runs start with the installed version and cleanup mode. Interactive terminals use color for sections and outcomes. Set `NO_COLOR=1` for plain text. Redirected output and the `--json` summary are plain by default.
+
 ## Project directory
 
 The script auto-detects your project directory by checking (in order):

@@ -223,19 +223,20 @@ finish() {
     exit "$result"
 }
 trap finish EXIT
+source "$SCRIPT_DIR/scripts/terminal.sh"
 record_item() { printf '%s\0' "$1" "$2" "$3" "${4:-0}" >> "$CLEAN_EVENT_FILE"; }
-step_failed() { echo "  [FAILED] $1 ($2)" >&2; record_item failed "$1" "$2"; }
-keep_item() { echo "  [KEEP $2] $1"; record_item kept "$1" "$2"; }
+step_failed() { term_line failed "  Failed" "  $1 ($2)" >&2; record_item failed "$1" "$2"; }
+keep_item() { term_line kept "  Kept" "  $1 ($2)"; record_item kept "$1" "$2"; }
 
 if [ "$CHECK_MODE" = true ]; then
     export GIT_OPTIONAL_LOCKS=0  # git status may otherwise refresh a worktree index
-    echo "🔍 Checking potential space savings..."
-    echo ""
+    run_mode="Dry run"
 else
-    echo "🧹 Starting disk cleanup..."
-    [ "$AGGRESSIVE_MODE" = true ] && echo "💥 Aggressive mode enabled (Docker full prune)"
-    echo ""
+    run_mode="Disk cleanup"
 fi
+[ "$AGGRESSIVE_MODE" = false ] || run_mode="$run_mode (aggressive)"
+term_line heading "clean $VERSION" "  ·  $run_mode"
+echo ""
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -394,17 +395,18 @@ discover_active_worktrees() {
     done
 }
 
-# Returns 0 (true) if $path is inside any active worktree.
+# Returns 0 (true) if the supplied physical path is inside any active worktree.
 # With a second arg "allow-self", an exact match with a worktree root does NOT
 # count — used when evaluating a worktree itself for removal, where only
 # containment in a DIFFERENT worktree should block.
 is_in_active_worktree() {
     local path="$1"
     local allow_self="${2:-}"
-    local abs="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)/$(basename "$path")"
+    local wt
+    [ -n "$ACTIVE_WORKTREES" ] || return 1
     while IFS= read -r wt; do
         [ -z "$wt" ] && continue
-        case "$abs" in
+        case "$path" in
             "$wt") [ "$allow_self" = "allow-self" ] || return 0 ;;
             "$wt"/*) return 0 ;;
         esac
@@ -586,10 +588,13 @@ PYLINKS
     done
     # Loom's per-workspace opt-out, honoured here too so both cleaners agree.
     for proj in "${PROJECTS[@]}"; do
-        if cat "$proj/.loom/config.json" "$proj"/.loom-local/*.json 2>/dev/null \
-            | grep -qE '"keepBuildArtifacts"[[:space:]]*:[[:space:]]*true'; then
-            candidates+="$(echo "${proj%/}" | tag_lines keepBuildArtifacts)"$'\n'
-        fi
+        for cfg in "$proj/.loom/config.json" "$proj"/.loom-local/*.json; do
+            [ -f "$cfg" ] || continue
+            if grep -qE '"keepBuildArtifacts"[[:space:]]*:[[:space:]]*true' "$cfg"; then
+                candidates+="keepBuildArtifacts"$'\t'"$proj"$'\n'
+                break
+            fi
+        done
     done
     # Explicit keeps: CLEAN_KEEP_PROJECTS=name1:name2
     for proj in "${PROJECTS[@]}"; do
@@ -631,19 +636,23 @@ remove_item() {
         shift 2
         "$@" || return 0
     fi
-    echo "  [$reason] $item ($(bytes_to_human "$kib"))"
+    local detail="  [$reason] $item ($(bytes_to_human "$kib"))"
+    if [ "$CHECK_MODE" = true ]; then
+        term_line would_remove "  Would remove" "$detail"
+        record_item would_remove "$item" "$reason" "$((kib * 1024))"
+        return 0
+    fi
+    printf '  Removing%s\n' "$detail"
     if [ -n "${CLEAN_ACTIVITY_SNAPSHOT:-}" ] && [ ! -e "$project/.git" ]; then
         parent=${item%/*}
         before=$(/usr/bin/stat -f '%d %i %.9Fm' "$parent") || before=""
     fi
-    if [ "$CHECK_MODE" = true ]; then
-        record_item would_remove "$item" "$reason" "$((kib * 1024))"
-    elif rm -rf -- "$item"; then
+    if rm -rf -- "$item"; then
         if [ -n "$before" ] && after=$(/usr/bin/stat -f '%d %i %.9Fm' "$parent") && [ "${before% *}" = "${after% *}" ]; then
             printf '%s %s\n' "$before" "${after##* }" >> "$CLEAN_ACTIVITY_SNAPSHOT.dirs"
         fi
         record_item removed "$item" "$reason" "$((kib * 1024))"
-        echo "    ✓ Removed"
+        term_line removed "    ✓ Removed"
     else
         step_failed "$item" "$reason"
     fi
@@ -654,11 +663,12 @@ remove_item() {
 # =============================================================================
 
 unset CLEAN_ACTIVITY_SNAPSHOT
-discover_active_worktrees
+if [ "${#PROJECTS[@]}" -gt 0 ]; then
+    term_line step "Checking active worktrees"
+    discover_active_worktrees
+fi
 if [ "$RUN_SYSTEM" = true ]; then
-echo "═══════════════════════════════════════════════════════════"
-echo "              SYSTEM CLEANUP"
-echo "═══════════════════════════════════════════════════════════"
+term_line heading "System cleanup"
 echo ""
 
 
@@ -667,11 +677,13 @@ clean_cache() {
     local path=$1 label=$2 before after
     shift 2
     [ -d "$path" ] || { record_item skipped "$path" "cache absent"; return; }
-    before=$(get_size_kib "$path") || { step_failed "$path" "measure cache"; return; }
     if [ "$CHECK_MODE" = true ]; then
         echo "  Would run: $*"
         record_item would_remove "$path" "$label"
-    elif "$@"; then
+        return
+    fi
+    before=$(get_size_kib "$path") || { step_failed "$path" "measure cache"; return; }
+    if "$@"; then
         after=0
         if [ -e "$path" ]; then after=$(get_size_kib "$path") || { step_failed "$path" "measure cache"; return; }; fi
         record_item removed "$path" "$label" "$(( before > after ? (before - after) * 1024 : 0 ))"
@@ -681,6 +693,7 @@ clean_cache() {
 }
 
 if command -v brew >/dev/null; then
+    term_line step "Homebrew cache"
     if cache=$(brew --cache); then
         clean_cache "$cache" "brew cleanup" timeout 60 brew cleanup --prune=all -s
     else
@@ -697,6 +710,7 @@ python3 -B "$SCRIPT_DIR/scripts/system_sweep.py" "${sweep_args[@]}" || step_fail
 echo ""
 
 if command -v pnpm >/dev/null; then
+    term_line step "pnpm store"
     if [ "$CHECK_MODE" = true ]; then
         # Even 'pnpm store path' can create a new store. Prune itself knows
         # which objects are reclaimable only when it runs.
@@ -706,10 +720,12 @@ if command -v pnpm >/dev/null; then
     else step_failed pnpm "locate store"; fi
 fi
 if command -v pip >/dev/null; then
+    term_line step "pip cache"
     if cache=$(pip cache dir); then clean_cache "$cache" "pip cache purge" pip cache purge
     else step_failed pip "locate cache"; fi
 fi
 if command -v uv >/dev/null; then
+    term_line step "uv cache"
     if cache=$(uv cache dir); then clean_cache "$cache" "uv cache prune" uv cache prune
     else step_failed uv "locate cache"; fi
 fi
@@ -734,7 +750,7 @@ clean_shared_target
 
 # Docker cleanup
 if command -v docker &> /dev/null; then
-    echo "🐳 Cleaning Docker resources..."
+    term_line step "Docker resources"
 
     docker_prune() {
         local output allocated
@@ -752,7 +768,7 @@ if command -v docker &> /dev/null; then
     }
     if ! timeout 5 docker info &>/dev/null; then
         record_item skipped docker "engine unavailable"
-        echo "  Docker engine unreachable. Check free space on its data volume below before restarting Docker."
+        term_line skipped "  Docker engine unreachable." " Check free space on its data volume below before restarting Docker."
         echo ""
     else
         if [ "$CHECK_MODE" = false ]; then
@@ -798,7 +814,7 @@ if command -v docker &> /dev/null; then
 fi
 
 # VS Code extension caches
-echo "💻 Cleaning VS Code caches..."
+term_line step "VS Code caches"
 if [ -d ~/Library/Caches/vscode-cpptools ]; then
     SIZE=$(get_size ~/Library/Caches/vscode-cpptools)
     remove_item ~/Library/Caches/vscode-cpptools "vscode-cpptools ($SIZE)"
@@ -827,7 +843,7 @@ fi
 # Safety: RECURSIVE idle check + lsof + worktree containment + never delete
 # uncommitted or unpushed work (a 1-hour threshold on the root mtime alone
 # deleted live agent worktrees whose deep files were being edited).
-echo "🗑️  Cleaning stale /tmp clones (>$TMP_AGE_HOURS h idle, no open handles, no WIP)..."
+term_line step "Temporary Git clones (idle >$TMP_AGE_HOURS hours)"
 for d in /private/tmp/*/; do
     d="${d%/}"
     [ -d "$d" ] && [ ! -L "$d" ] || continue
@@ -845,7 +861,11 @@ for d in /private/tmp/*/; do
 
     # A dir nested inside a DIFFERENT live worktree is not ours to touch; an
     # exact match means $d is itself a registered worktree — handled below.
-    if is_in_active_worktree "$d" allow-self; then
+    if ! physical_d=$(cd "$d" && pwd -P); then
+        keep_item "$d" "could not resolve worktree path"
+        continue
+    fi
+    if is_in_active_worktree "$physical_d" allow-self; then
         keep_item "$d" "inside active worktree"
         continue
     fi
@@ -892,6 +912,8 @@ echo ""
 fi  # system phase
 
 if [ "$RUN_PROJECTS" = true ]; then
+term_line heading "Project cleanup" "  (${#PROJECTS[@]} workspaces)"
+echo ""
 
 if [ "$CHECK_MODE" = false ]; then
     CLEAN_ACTIVITY_SNAPSHOT="$run_dir/activity.json"
@@ -900,17 +922,12 @@ if [ "$CHECK_MODE" = false ]; then
     : > "$CLEAN_ACTIVITY_SNAPSHOT.dirs"
 fi
 
-echo "═══════════════════════════════════════════════════════════"
-echo "              PROJECT CLEANUP (${#PROJECTS[@]} workspaces)"
-echo "═══════════════════════════════════════════════════════════"
-echo ""
-
 # Projects other programs run in place (MCP servers, linked CLIs): every
 # artifact pass below leaves them alone.
 # `|| true` also turns set -e off inside it: a detection failure means less
 # protection reported, never an aborted cleanup.
 discover_runtime_projects || true
-echo "🔌 Runtime projects (MCP servers, linked CLIs, keepBuildArtifacts) — artifacts kept:"
+term_line step "Protected runtime projects"
 if [ -n "$RUNTIME_PROJECTS" ]; then
     printf '%s' "$RUNTIME_PROJECTS" | while IFS=$'\t' read -r name why; do
         keep_item "$name" "runtime: $why"
@@ -924,7 +941,7 @@ echo ""
 # from a live project is not a data-loss bug (they regenerate) but it silently
 # breaks the next build, which is how this was found: three repos lost their
 # deps mid-session while agents were working in them.
-echo "📦 Node.js caches (node_modules, .next) — projects idle >$NODE_MODULES_AGE_DAYS days..."
+term_line step "Node.js caches (projects idle >$NODE_MODULES_AGE_DAYS days)"
 for project in "${PROJECTS[@]}"; do
     [ -d "$project" ] || continue
     [ -d "$project/node_modules" ] || [ -d "$project/.next" ] || continue
@@ -963,18 +980,26 @@ for project in "${PROJECTS[@]}"; do
         step_failed "$project" "enumerate project artifacts"
         continue
     fi
-    while IFS= read -r -d '' kind && IFS= read -r -d '' item && IFS= read -r -d '' expected; do
+    [ -s "$candidate_file" ] || continue
+    scan_time=$(date +%s)
+    project_in_worktree=false
+    if is_in_active_worktree "$project"; then project_in_worktree=true; fi
+    while IFS= read -r -d '' kind && IFS= read -r -d '' item &&
+          IFS= read -r -d '' expected && IFS= read -r -d '' modified; do
         case "$kind" in
             cache) reason="Python cache"; days=$PYCACHE_AGE_DAYS ;;
             bytecode) reason="stray .pyc"; days=$PYCACHE_AGE_DAYS ;;
             venv) reason="venv"; days=$VENV_AGE_DAYS ;;
             cargo) reason="Rust target"; days=$TARGET_AGE_DAYS ;;
         esac
-        if [ -L "$item" ] || [ "$(cd "$(dirname "$item")" && pwd -P)" != "${item%/*}" ]; then
+        if [ -L "$item" ] || [ "$(cd "${item%/*}" && pwd -P)" != "${item%/*}" ]; then
             keep_item "$item" "symlinked artifact path"
-        elif [[ "$kind" != cargo && "$kind" != venv ]] && is_in_active_worktree "$item"; then
+        elif [[ "$kind" != cargo && "$kind" != venv ]] &&
+             { [ "$project_in_worktree" = true ] || is_in_active_worktree "$item"; }; then
             keep_item "$item" "active worktree"
-        elif ! is_older_than_days "$item" "$days"; then
+        # Discovery can tell us to keep a recent item. Re-stat older items
+        # before considering removal in case they changed since discovery.
+        elif (( scan_time - modified <= days * 86400 )) || ! is_older_than_days "$item" "$days"; then
             keep_item "$item" "recent $reason"
         elif [[ "$kind" = cargo || "$kind" = venv ]]; then
             if has_recent_project_activity "$project" "$days"; then
@@ -991,16 +1016,20 @@ done
 clean_project_lake_builds
 
 # Java/Kotlin build directories
-echo "☕ Java/Kotlin build caches (build/, .gradle/)..."
+term_line step "Gradle build caches"
+has_gradle_build() {
+    [ -d "$1/build" ] && { [ -f "$1/build.gradle" ] || [ -f "$1/build.gradle.kts" ]; }
+}
 for project in "${PROJECTS[@]}"; do
     [ -d "$project" ] || continue
+    has_gradle_build "$project" || [ -d "$project/.gradle" ] || continue
     runtime_project_reason "$project" >/dev/null && continue
 
-    if { [ -d "$project/build" ] || [ -d "$project/.gradle" ]; } && has_open_handles "$project"; then
+    if has_open_handles "$project"; then
         keep_item "$project" "open handles"
         continue
     fi
-    if [ -d "$project/build" ] && [ -f "$project/build.gradle" -o -f "$project/build.gradle.kts" ]; then
+    if has_gradle_build "$project"; then
         remove_item "$project/build" "Gradle build"
     fi
 
@@ -1011,7 +1040,7 @@ done
 echo ""
 
 # Per-repo git maintenance
-echo "🌳 Per-repo git maintenance (worktree prune + gc --auto)..."
+term_line step "Git maintenance"
 for project in "${PROJECTS[@]}"; do
     [ -d "$project/.git" ] || continue
     if [ "$CHECK_MODE" = false ]; then
@@ -1031,13 +1060,11 @@ unset CLEAN_ACTIVITY_SNAPSHOT
 fi  # project phase
 
 if [ "$RUN_WORKTREES" = true ]; then
-echo "═══════════════════════════════════════════════════════════"
-echo "              WORKTREE CLEANUP"
-echo "═══════════════════════════════════════════════════════════"
+term_line heading "Worktree cleanup"
 echo ""
 
 if ! command -v gh >/dev/null || ! GH_PROMPT_DISABLED=1 timeout 10 gh api user --silent </dev/null >/dev/null 2>&1; then
-    echo "  Skipping worktree cleanup: GitHub unavailable or unauthenticated"
+    term_line skipped "  Skipped" "  GitHub unavailable or unauthenticated"
     record_item skipped worktrees "GitHub unavailable or unauthenticated"
     echo ""
 else
@@ -1207,7 +1234,7 @@ done
 echo ""
 
 # Clean Loom tmux sessions (loom-*)
-echo "🧵 Loom tmux sessions..."
+term_line step "Loom tmux sessions"
 if [ "$EXPLICIT_PROJECTS" = true ] || [ "$PHASE" = "--worktrees-only" ] || [ ! -t 0 ]; then
     record_item skipped tmux "global sessions omitted from scoped or unattended runs"
 elif command -v tmux >/dev/null; then
@@ -1241,5 +1268,5 @@ fi
 # =============================================================================
 
 [ -z "$SHARED_CARGO_SUMMARY" ] || echo "$SHARED_CARGO_SUMMARY"
-echo "Current disk usage:"
+term_line heading "Disk usage"
 df -h / | tail -1 | awk '{print "  Available: " $4 " (" $5 " used)"}'

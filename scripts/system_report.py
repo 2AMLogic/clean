@@ -12,6 +12,8 @@ import tempfile
 import time
 from collections import defaultdict
 
+from terminal import styled
+
 GIB = 1024 ** 3
 DAY = 86400
 
@@ -49,7 +51,7 @@ def elapsed(value):
 
 
 def memory_report():
-    print("\nMemory")
+    print("\n" + styled("Memory", "heading"), flush=True)
     swap = query(["sysctl", "-n", "vm.swapusage"])
     print(f"  Swap: {swap or 'unavailable'}")
     pressure = query(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"])
@@ -89,11 +91,11 @@ def footprint(path, now):
     newest = None
     incomplete = False
     hardlinks = set()
-    todo = [path]
+    todo = [os.fspath(path)]
     while todo:
         entry = todo.pop()
         try:
-            st = entry.lstat()
+            st = os.lstat(entry)
             newest = st.st_mtime if newest is None else max(newest, st.st_mtime)
             if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
                 key = (st.st_dev, st.st_ino)
@@ -103,7 +105,7 @@ def footprint(path, now):
             size += st.st_blocks * 512
             if stat.S_ISDIR(st.st_mode):
                 with os.scandir(entry) as children:
-                    todo.extend(Path(child.path) for child in children)
+                    todo.extend(child.path for child in children)
             elif stat.S_ISREG(st.st_mode):
                 age = now - st.st_mtime
                 old30 += age > 30 * DAY
@@ -189,8 +191,8 @@ def tool_homes(home, projects):
     runtimes = list((home / ".loom/opt").glob("*-*/xdg"))
     paths.extend(runtimes)
     configs = references(home, projects) if runtimes else ""
+    print("\n" + styled("Large tool homes", "heading") + " (allocated size, newest mtime, files older than 30 / 90 days)", flush=True)
     rows = [(footprint(p, now), p) for p in paths if p.exists()]
-    print("\nLarge tool homes (allocated size, newest mtime, files older than 30 / 90 days)")
     for (size, newest, old30, old90, incomplete), path in sorted(
             rows, key=lambda row: row[0][0], reverse=True):
         suffix = " (partial scan)" if incomplete else ""
@@ -234,6 +236,7 @@ def docker_report(home, floor):
     settings = home / "Library/Group Containers/group.com.docker/settings-store.json"
     if not default.exists() and not settings.exists() and not shutil.which("docker"):
         return
+    print("\n" + styled("Docker Desktop storage", "heading"), flush=True)
     folder = default
     certain = True
     if settings.exists():
@@ -257,7 +260,6 @@ def docker_report(home, floor):
     for root in os.environ.get("CLEAN_DOCKER_SEARCH_ROOTS", "").split(os.pathsep):
         if root and Path(root).is_absolute():
             found.update(p.resolve() for p in Path(root).rglob("Docker.raw"))
-    print("\nDocker Desktop storage")
     print(f"  Data folder: {folder}")
     if not shutil.which("docker"):
         print("  Docker CLI unavailable. Check free space here before starting Docker Desktop.")
@@ -279,7 +281,7 @@ def docker_report(home, floor):
         free = shutil.disk_usage(folder).free
         print(f"  Data volume free: {human(free)}")
         if free < floor:
-            print(f"  LOW DISK: below {human(floor)} on {folder}")
+            print(f"  {styled('LOW DISK', 'skipped')}: below {human(floor)} on {folder}")
     except OSError:
         print(f"  Volume free space unavailable for {folder}")
 

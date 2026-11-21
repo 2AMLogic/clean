@@ -2,6 +2,7 @@
 set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd -P)
 source "$SCRIPT_DIR/scripts/build-artifacts.sh"
+source "$SCRIPT_DIR/scripts/terminal.sh"
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 fixture=$(cd "$fixture" && pwd -P)

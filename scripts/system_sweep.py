@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 from scratch import ProcessSnapshot, event, human, option, scratch_areas, sweep
+from terminal import styled
 
 
 def allocated(path):
@@ -22,14 +23,15 @@ def tool_cache(path, command, preview, env=None):
     if not path.is_dir() or path.is_symlink():
         return
     before = allocated(path)
-    print(f"  {path}: {human(before)} before")
+    print(f"  {path} ({human(before)} before)", flush=True)
     if preview:
         event("would_remove", path, " ".join(command), before)
     else:
         subprocess.run(command, cwd="/", check=True, env=env)
         after = allocated(path)
-        print(f"  {path}: {human(after)} after")
-        event("removed", path, " ".join(command), max(0, before - after))
+        freed = max(0, before - after)
+        event("removed", path, " ".join(command), freed, quiet=True)
+        print(f"  {styled('Freed', 'removed')} {human(freed)} ({human(after)} after)")
 
 
 def npm_cache_root():
@@ -156,7 +158,7 @@ def main():
         ("sccache", compiler_cache, (preview, args.aggressive, threshold)),
         ("Scratch directories", scratch_areas, (preview, processes, tmp_days, session_days, scratch_days)),
     ):
-        print(name, flush=True)
+        print(styled(name, "step"), flush=True)
         try:
             run(*arguments)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:

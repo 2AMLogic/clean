@@ -3,6 +3,8 @@ import json
 import os
 import sys
 
+from terminal import styled
+
 
 def human(size):
     for suffix in ("K", "M", "G", "T"):
@@ -29,9 +31,9 @@ def main():
         print(json.dumps(dict(check=check_mode == "true", exit_code=failed,
                               bytes_freed=freed, bytes_reclaimable=estimate, items=items)))
     elif check_mode == "true":
-        print(f"Potential space savings: {human(estimate)}")
+        print(styled(f"Potential space savings: {human(estimate)}", "would_remove"))
     else:
-        print(f"Space freed: {human(freed)}")
+        print(styled(f"Space freed: {human(freed)}", "removed"))
     return failed
 
 

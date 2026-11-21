@@ -14,9 +14,12 @@ import subprocess
 import time
 import uuid
 
+from terminal import styled
+
 
 MKTEMP = re.compile(r"(.+)[.]([a-zA-Z0-9]{6,16})$")
 HEX_HASH = re.compile(r"[0-9a-f]{8,64}$")
+BARE_REPO_ENTRIES = {"HEAD", "objects", "refs"}
 
 
 def human(size):
@@ -28,7 +31,8 @@ def human(size):
 
 def event(status, path, reason, size=0, *, quiet=False):
     if not quiet:
-        print(f"  [{status}] {path} ({reason}, {human(size)})")
+        label = styled(status.replace("_", " ").capitalize(), status)
+        print(f"  {label}  {path} ({reason}, {human(size)})")
     log = os.environ.get("CLEAN_EVENT_FILE")
     if log:
         with open(log, "ab") as out:
@@ -94,28 +98,32 @@ def inspect(path, cutoff, *, size_recent=False):
     recent = False
     repos = []
     reason = ""
+    uid = os.getuid()
     device = path.lstat().st_dev
-    stack = [path]
+    stack = [os.fspath(path)]
     while stack:
         item = stack.pop()
-        st = item.lstat()
+        st = os.lstat(item)
         size += st.st_blocks * 512
         recent |= st.st_mtime >= cutoff
         if recent and not size_recent:
             return 0, "recent activity", repos
-        if st.st_uid != os.getuid() or st.st_dev != device:
+        if st.st_uid != uid or st.st_dev != device:
             return size, "other owner or mounted filesystem", repos
-        if item.name == ".git":
+        name = os.path.basename(item)
+        if name == ".git":
             if not stat.S_ISDIR(st.st_mode):
                 return size, "linked worktree or external git directory", repos
-            repos.append(item.parent)
+            repos.append(Path(item).parent)
         if stat.S_ISDIR(st.st_mode):
+            markers = set()
             with os.scandir(item) as entries:
-                children = [Path(entry.path) for entry in entries]
-            names = {child.name for child in children}
-            if item.name != ".git" and {"HEAD", "objects", "refs"} <= names:
+                for entry in entries:
+                    stack.append(entry.path)
+                    if entry.name in BARE_REPO_ENTRIES:
+                        markers.add(entry.name)
+            if name != ".git" and markers == BARE_REPO_ENTRIES:
                 return size, "bare Git repository", repos
-            stack.extend(children)
         elif stat.S_ISSOCK(st.st_mode):
             reason = "socket"
         elif not (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)):
