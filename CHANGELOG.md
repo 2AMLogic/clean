@@ -7,46 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-21
+
 ### Added
 
-- **Projects that other programs run in place keep their artifacts.** An MCP
-  server is often launched straight from a project checkout (`node
-  ~/GitHub/squad/dist/index.js`), so that project's `node_modules/` is a
-  runtime dependency, not a cache. Neither existing gate can see this: a
-  running server holds no open handle on modules it has already loaded, and
-  the project it runs from may sit unedited for weeks. Losing it took down the
-  squad MCP for every agent on the machine, twice in one week. `clean` now
-  finds these projects from the MCP configs (Claude Code user and per-project
-  `~/.claude.json`, each project's `.mcp.json` including env-var paths,
-  Claude Desktop, Cursor, Codex `[mcp_servers.*]`), from CLIs symlinked into a
-  bin directory or the global `node_modules` (`npm link`), from Loom's
-  `clean.keepBuildArtifacts`, and from `CLEAN_KEEP_PROJECTS`. The
-  `node_modules`/`.next`, venv, Rust `target/` and Gradle passes all skip them,
-  and each run prints the list with the reason for each. Without `python3`, the
-  JSON configs fall back to a string scan, except `~/.claude.json`, which also
-  lists every project ever opened and so is skipped rather than over-matched.
+- Select workspaces with repeatable `--project` flags or `CLEAN_PROJECTS`, run individual cleanup phases, and use `--json` for per-item outcomes and byte counts. Age thresholds can be set through the environment.
+- Schedule unattended cleanup on macOS with `clean schedule install`. The LaunchAgent logs available disk space and warns when it falls below the configured floor. Use `clean schedule status` to inspect the last run.
+- Inspect memory pressure, swap usage, long-running temporary processes, and the size and age of developer tool homes. Docker Desktop storage reports show disk image sizes and volume headroom even when the engine is offline.
+- Reclaim idle Lean `.lake/build` directories and individual profiles in shared Cargo target directories. Lean packages and active Cargo builds are preserved.
+- Clean idle Claude scratchpads, macOS temporary entries, and scratch directories under `CLEAN_SCRATCH_ROOTS`. Preview groups candidates by name prefix. Cache cleanup now covers old npx entries, Go build caches, and sccache objects.
+
+### Changed
+
+- Cleanup requires macOS and Python 3.9 or later. Unattended or workspace-scoped runs skip global tmux cleanup, and worktree cleanup can skip GitHub when it is unavailable.
 
 ### Fixed
 
-- **`node_modules` and `.next` are no longer deleted from active projects.**
-  They were the only per-project category with no age threshold and no
-  active-worktree check — every sibling (Python caches, venvs, Rust `target/`)
-  had both, and the README already promised age thresholds for all of them.
-  In practice `clean` removed the dependencies of repos that were being worked
-  in at that moment, three times in one eight-hour session; nothing is lost
-  permanently, but the next build fails and the cause is not obvious from the
-  failure.
-
-  The test is deliberately applied to the **project**, not to the artifact.
-  `node_modules`' own mtime is stamped at install time and is never bumped by
-  use, so "is `node_modules` old?" answers the wrong question — a tree
-  installed months ago and built against hourly looks stale. `clean` now asks
-  whether the project has been touched within `NODE_MODULES_AGE_DAYS` (default
-  7, matching `VENV_AGE_DAYS`/`TARGET_AGE_DAYS`), scanning recursively with the
-  heavy artifact dirs pruned and `.git` deliberately left in, since commits and
-  fetches are activity. Projects with open file handles are skipped as well.
-  Idle projects are still cleaned, and both decisions are now reported in
-  `--check` output.
+- `--check` preserves stray Python bytecode and includes it in potential savings. Preview and cleanup account for directory timestamps changed by earlier cleanup steps.
+- Active projects retain their `node_modules` and `.next` directories. The activity check recognizes recent commits and authored files while ignoring background fetches and Loom bookkeeping.
+- Projects used by MCP servers, linked CLIs, or Loom's `clean.keepBuildArtifacts` setting retain their runtime dependencies and build output. Use `CLEAN_KEEP_PROJECTS` to protect additional projects.
+- Worktree and scratch cleanup preserve unpublished Git work, including additional local branches and stashes in full clones.
 
 ## [0.3.0] - 2026-07-08
 
