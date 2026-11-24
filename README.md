@@ -83,6 +83,15 @@ clean --help       # Show detailed help
 
 Runs start with the installed version and cleanup mode. Interactive terminals use color for sections and outcomes. Set `NO_COLOR=1` for plain text. Redirected output and the `--json` summary are plain by default.
 
+### Run logs
+
+Each cleanup run saves its full stdout and stderr in a private file under
+`~/.clean/logs/`. This includes previews, failed runs, and scheduled runs.
+You can read a log while the run is in progress. Once a run finishes, `clean`
+keeps the five newest completed logs, ordered by their UTC start times.
+
+List the logs from newest to oldest with `ls -1r ~/.clean/logs/run-*.log`.
+
 ## Project directory
 
 The script auto-detects your project directory by checking (in order):
@@ -218,8 +227,9 @@ clean schedule uninstall
 
 Installation loads a per-user LaunchAgent. The default interval is 24 hours.
 The agent runs ordinary cleanup with stdin closed and writes to
-`~/Library/Logs/clean.log`. Status includes the last completed run, exit code
-and free space. The log records free space before and after each run.
+`~/Library/Logs/clean.log`. Each scheduled run also gets its own transcript in
+`~/.clean/logs/`, including the free space before and after cleanup.
+`clean schedule status` shows the last completed run, exit code, and free space.
 Set `CLEAN_LOW_DISK_GIB` (default 30) before installation to change the warning
 threshold shared by the schedule and Docker report. Reinstall to update the
 interval or captured cleanup settings. Scheduling and system diagnostics

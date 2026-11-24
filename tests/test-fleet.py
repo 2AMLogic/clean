@@ -1,4 +1,5 @@
 """Public CLI, isolated homes and projects, with no live system cleanup."""
+import fcntl
 import json
 import os
 import pty
@@ -31,6 +32,7 @@ class Fleet(unittest.TestCase):
                         PATH=f"{self.bin}:/usr/bin:/bin", LC_ALL="C")
         self.link = self.bin / "clean"
         self.link.symlink_to(SCRIPT)
+        self.logs = self.root / ".clean/logs"
 
     def cli(self, *args, **env):
         return subprocess.run([self.link, *args], env=dict(self.env, **env),
@@ -146,12 +148,64 @@ class Fleet(unittest.TestCase):
                     self.assertEqual("\x1b[" in line, color)
 
     def test_step_failure(self):
-        self.stub("rm", 'case "$*" in *".pyc") exit 1;; esac\nexec /bin/rm "$@"')
+        self.stub("rm", 'case "$*" in *".pyc") echo "fixture rm failure" >&2; exit 1;; esac\n'
+                  'exec /bin/rm "$@"')
         result = self.cli("--projects-only", "--project", str(self.project), "--json")
         self.assertNotEqual(result.returncode, 0)
         data = json.loads(result.stdout)
         self.assertEqual(data["items"][0]["status"], "failed")
         self.assertEqual(data["bytes_freed"], 0)
+        log, = self.logs.glob("*.log")
+        self.assertIn("fixture rm failure", result.stderr)
+        transcript = log.read_text()
+        self.assertIn(result.stdout, transcript)
+        self.assertEqual(transcript.replace(result.stdout, "", 1), result.stderr)
+
+    def test_recent_run_logs(self):
+        self.cli("--help")
+        self.cli("--version")
+        self.assertFalse(self.logs.exists())
+        self.stub("gh", "exit 1")
+        args = ("--worktrees-only", "--project", str(self.project), "--check")
+        first = self.cli(*args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        oldest, = self.logs.glob("*.log")
+        self.assertEqual(oldest.read_text(), first.stdout)
+        self.assertEqual(oldest.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.logs.stat().st_mode & 0o777, 0o700)
+        note = self.logs / "notes.log"
+        note.write_text("keep")
+        # An older run is still writing while several short runs finish.
+        with oldest.open("ab") as active:
+            fcntl.flock(active, fcntl.LOCK_EX)
+            for _ in range(5):
+                self.assertEqual(self.cli(*args).returncode, 0)
+            self.assertEqual(len(list(self.logs.glob("run-*.log"))), 6)
+            self.assertTrue(oldest.exists())
+        self.assertEqual(self.cli(*args).returncode, 0)
+        self.assertEqual(len(list(self.logs.glob("run-*.log"))), 5)
+        self.assertFalse(oldest.exists())
+        self.assertEqual(note.read_text(), "keep")
+
+    def test_scheduled_run_has_one_complete_log(self):
+        # Stop the scheduled cleanup at preflight, before it touches the host.
+        self.stub("uname", "echo Linux")
+        run = self.cli("schedule", "run")
+        self.assertEqual(run.returncode, 2)
+        log, = self.logs.glob("*.log")
+        lines = log.read_text().splitlines()
+        self.assertIn("Scheduled clean started", lines[0])
+        self.assertIn("requires macOS", lines[1])
+        self.assertIn("Scheduled clean finished", lines[2])
+        self.assertIn("exit 2", lines[2])
+
+    def test_cleanup_when_log_directory_is_unavailable(self):
+        (self.root / ".clean").touch()
+        self.stub("gh", "exit 1")
+        result = self.cli("--worktrees-only", "--check", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("could not create run log", result.stderr)
+        self.assertTrue(json.loads(result.stdout)["check"])
 
     def test_full_clone_other_refs_and_external_worktree_root(self):
         def git(repo, *args):

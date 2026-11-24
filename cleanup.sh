@@ -65,8 +65,18 @@ EXPLICIT_PROJECTS=false
 PROJECTS=()
 ACTIVE_WORKTREES=""
 PHASE=""
+
+# The recorder forwards both streams and returns the cleanup command's status.
+# A scheduled run keeps the same recorder around the scheduler and its cleanup.
+with_run_log() {
+    [ "${_CLEAN_RECORDING:-}" != 1 ] || return 0
+    python3 -B -c 'pass' >/dev/null 2>&1 || { echo "clean: Python 3 is required for cleanup" >&2; exit 2; }
+    exec python3 -B "$SCRIPT_DIR/scripts/run_log.py" "$SCRIPT_DIR/cleanup.sh" "$@"
+}
+
 # Parse arguments
 if [ "${1:-}" = schedule ]; then
+    if [ "${2:-}" = run ]; then with_run_log "$@"; fi
     shift
     exec python3 -B "$SCRIPT_DIR/scripts/schedule.py" "$@"
 fi
@@ -83,6 +93,7 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     echo "       clean schedule install [--interval-hours N] | status | uninstall"
     echo ""
     echo "Designed for developers working with lots of git worktrees."
+    echo "The five most recent cleanup logs are in ~/.clean/logs/"
     echo ""
     echo "System cleanup:"
     echo "  • Homebrew, npm, pnpm, pip, bun, uv caches"
@@ -144,6 +155,8 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
     exit 0
 fi
 
+with_run_log "$@"
+unset _CLEAN_RECORDING
 die() { echo "clean: $*" >&2; exit 2; }
 
 [ "$(uname -s)" = Darwin ] || die "cleanup requires macOS; no cleanup phases were run"
@@ -205,7 +218,6 @@ if command -v git >/dev/null; then
     for key in $git_env; do unset "$key"; done
     unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
 fi
-python3 -B -c 'pass' >/dev/null 2>&1 || die "Python 3 is required for cleanup"
 # One private, ephemeral journal also captures events in piped shell loops.
 run_dir=$(mktemp -d -t clean-events)
 CLEAN_EVENT_FILE="$run_dir/events"

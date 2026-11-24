@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Keep complete output from the five most recent cleanup runs in `~/.clean/logs/`, including previews and scheduled runs.
+
 ## [0.5.0] - 2026-11-21
 
 ### Added
